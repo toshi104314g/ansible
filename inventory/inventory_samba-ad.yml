@@ -1,0 +1,40 @@
+---
+all:
+  children:
+    ad_dc:
+      hosts:
+        ad1:
+          ansible_host: "192.168.10.20"
+          utm_vm_name: ad1
+
+    samba_file_servers:
+      hosts:
+        files1:
+          ansible_host: "192.168.10.21"
+          utm_vm_name: files1
+
+    linux_clients:
+      hosts:
+        linux1:
+          ansible_host: "192.168.10.22"
+          utm_vm_name: linux1
+
+    domain_members:
+      children:
+        samba_file_servers:
+        linux_clients:
+
+  vars:
+    utm_template_name: rocky9-template
+    utm_provision: clone
+    utm_network_connection: enp0s1
+    utm_global_ipv6_prefix: "2409:"
+    utm_ipv4_prefix_length: 24
+    utm_ipv4_gateway: 192.168.10.1
+    utm_ipv4_dns_servers:
+      - 192.168.10.1
+    ansible_user: root
+    ansible_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519"
+    ansible_ssh_common_args: >-
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile={{ lookup('env', 'HOME') }}/.ssh/known_hosts.ansible-utm

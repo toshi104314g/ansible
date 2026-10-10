@@ -3,10 +3,29 @@
 .ansible/
 ansible.log
 
+# Credentials and local secrets
+.env
+.env.*
+!.env.example
+**/.ssh/
+**/id_rsa
+**/id_ed25519
+**/id_ecdsa
+**/id_*_sk
+*.pem
+*.p12
+*.pfx
+*.key
+*vault-password*
+*.vault-pass
+
 # Local inventories
+/inventory/*
 *inventory*.ini
 *inventory*.yml
 *inventory*.yaml
+!/inventory/
+!/inventory/inventory_samba-ad.yml
 
 # Personal cloud-init configuration
 create-debian/files/user-data

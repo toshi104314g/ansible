@@ -1,0 +1,87 @@
+---
+- name: Configure existing guest hostname and static IPv4 over IPv6 SSH
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "root@{{ utm_existing_ipv6[item.name] }}"
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      changed=0
+      if [ "$(hostname)" != {{ item.hostname | quote }} ]; then
+        hostnamectl set-hostname {{ item.hostname | quote }}
+        changed=1
+      fi
+      connection={{ utm_network_connection | quote }}
+      address={{ (item.ipv4_address ~ '/' ~ utm_ipv4_prefix_length) | quote }}
+      gateway={{ utm_ipv4_gateway | quote }}
+      dns={{ (utm_ipv4_dns_servers | join(',')) | quote }}
+      if [ "$(nmcli -g ipv4.method connection show "$connection")" != manual ] ||
+         [ "$(nmcli -g ipv4.addresses connection show "$connection")" != "$address" ] ||
+         [ "$(nmcli -g ipv4.gateway connection show "$connection")" != "$gateway" ] ||
+         [ "$(nmcli -g ipv4.dns connection show "$connection")" != "$dns" ] ||
+         [ "$(nmcli -g ipv6.method connection show "$connection")" != auto ]; then
+        nmcli connection modify "$connection" \
+          ipv4.method manual \
+          ipv4.addresses "$address" \
+          ipv4.gateway "$gateway" \
+          ipv4.dns "$dns" \
+          ipv4.ignore-auto-dns yes \
+          ipv6.method auto
+        nmcli device reapply "$connection"
+        changed=1
+      fi
+      if [ "$changed" -eq 1 ]; then
+        echo guest-configured
+      fi
+  register: utm_existing_config_result
+  changed_when: "'guest-configured' in utm_existing_config_result.stdout"
+  loop: "{{ utm_existing_vms }}"
+
+- name: Verify existing guest hostname and static IPv4 over IPv6
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "root@{{ utm_existing_ipv6[item.name] }}"
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      test "$(hostname)" = {{ item.hostname | quote }}
+      test "$(nmcli -g ipv4.method connection show {{ utm_network_connection | quote }})" = manual
+      test "$(nmcli -g ipv4.addresses connection show {{ utm_network_connection | quote }})" = {{ (item.ipv4_address ~ '/' ~ utm_ipv4_prefix_length) | quote }}
+      test "$(ip -4 -o address show dev {{ utm_network_connection | quote }} | awk '{print $4}')" = {{ (item.ipv4_address ~ '/' ~ utm_ipv4_prefix_length) | quote }}
+  register: utm_existing_verification
+  changed_when: false
+  until: utm_existing_verification.rc == 0
+  retries: "{{ utm_poll_retries }}"
+  delay: "{{ utm_poll_delay }}"
+  loop: "{{ utm_existing_vms }}"
+
+- name: Show configured existing inventory guests
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.hostname }} configured with static IPv4
+      {{ item.ipv4_address }}/{{ utm_ipv4_prefix_length }} and IPv6 SLAAC.
+  loop: "{{ utm_existing_vms }}"

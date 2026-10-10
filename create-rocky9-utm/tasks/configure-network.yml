@@ -1,0 +1,72 @@
+    - name: Set static IPv4 and keep IPv6 SLAAC enabled
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -6
+          - -i
+          - "{{ utm_ssh_private_key_file }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - ConnectTimeout=5
+          - -o
+          - StrictHostKeyChecking=accept-new
+          - -o
+          - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+          - "root@{{ utm_vm_ipv6[item.name] }}"
+          - /usr/bin/bash
+          - -s
+        stdin: |
+          set -e
+          connection={{ utm_network_connection | quote }}
+          address={{ (item.ipv4_address ~ '/' ~ utm_ipv4_prefix_length) | quote }}
+          gateway={{ utm_ipv4_gateway | quote }}
+          dns={{ (utm_ipv4_dns_servers | join(',')) | quote }}
+          if [ "$(nmcli -g ipv4.method connection show "$connection")" != manual ] ||
+             [ "$(nmcli -g ipv4.addresses connection show "$connection")" != "$address" ] ||
+             [ "$(nmcli -g ipv4.gateway connection show "$connection")" != "$gateway" ] ||
+             [ "$(nmcli -g ipv4.dns connection show "$connection")" != "$dns" ] ||
+             [ "$(nmcli -g ipv6.method connection show "$connection")" != auto ]; then
+            nmcli connection modify "$connection" \
+              ipv4.method manual \
+              ipv4.addresses "$address" \
+              ipv4.gateway "$gateway" \
+              ipv4.dns "$dns" \
+              ipv4.ignore-auto-dns yes \
+              ipv6.method auto
+            nmcli device reapply "$connection"
+            echo changed
+          fi
+      register: utm_static_ipv4_updates
+      changed_when: "'changed' in utm_static_ipv4_updates.stdout"
+      loop: "{{ utm_clone_vms }}"
+
+    - name: Verify static IPv4 configuration on cloned virtual machines
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -6
+          - -i
+          - "{{ utm_ssh_private_key_file }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - ConnectTimeout=5
+          - -o
+          - StrictHostKeyChecking=accept-new
+          - -o
+          - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+          - "root@{{ utm_vm_ipv6[item.name] }}"
+          - /usr/bin/bash
+          - -s
+        stdin: |
+          set -e
+          test "$(nmcli -g ipv4.method connection show {{ utm_network_connection | quote }})" = manual
+          test "$(nmcli -g ipv4.addresses connection show {{ utm_network_connection | quote }})" = {{ (item.ipv4_address ~ '/' ~ utm_ipv4_prefix_length) | quote }}
+          test "$(ip -4 -o address show dev {{ utm_network_connection | quote }} | awk '{print $4}')" = {{ (item.ipv4_address ~ '/' ~ utm_ipv4_prefix_length) | quote }}
+      register: utm_static_ipv4_verification
+      changed_when: false
+      until: utm_static_ipv4_verification.rc == 0
+      retries: "{{ utm_poll_retries }}"
+      delay: "{{ utm_poll_delay }}"
+      loop: "{{ utm_clone_vms }}"
