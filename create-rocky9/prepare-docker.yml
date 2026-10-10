@@ -1,0 +1,116 @@
+---
+- name: Prepare Docker environment on Rocky Linux 9
+  hosts: rocky9_kernel
+  gather_facts: true
+  become: true
+
+  vars:
+    docker_user: "{{ ansible_user | default('toshiyuki') }}"
+
+  tasks:
+    - name: Install Docker repository prerequisites
+      ansible.builtin.dnf:
+        name:
+          - dnf-plugins-core
+        state: present
+      tags:
+        - install
+
+    - name: Configure Docker CE repository
+      ansible.builtin.yum_repository:
+        name: docker-ce-stable
+        description: Docker CE Stable - $basearch
+        baseurl: https://download.docker.com/linux/centos/$releasever/$basearch/stable
+        enabled: true
+        gpgcheck: true
+        gpgkey: https://download.docker.com/linux/centos/gpg
+        state: present
+      tags:
+        - install
+
+    - name: Install Docker Engine and plugins
+      ansible.builtin.dnf:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+      tags:
+        - install
+
+    - name: Enable and start Docker service
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+      tags:
+        - install
+
+    - name: Add login user to docker group
+      ansible.builtin.user:
+        name: "{{ docker_user }}"
+        groups:
+          - docker
+        append: true
+      tags:
+        - install
+
+    - name: Check Docker installation
+      ansible.builtin.command:
+        cmd: docker version --format '{{ '{{' }}.Server.Version{{ '}}' }}'
+      register: docker_version
+      changed_when: false
+      tags:
+        - install
+
+    - name: Show Docker version
+      ansible.builtin.debug:
+        msg: "Docker Engine version: {{ docker_version.stdout }}"
+      tags:
+        - install
+
+    - name: Check Docker Compose plugin
+      ansible.builtin.command:
+        cmd: docker compose version --short
+      register: docker_compose_version
+      changed_when: false
+      tags:
+        - install
+
+    - name: Show Docker Compose version
+      ansible.builtin.debug:
+        msg: "Docker Compose version: {{ docker_compose_version.stdout }}"
+      tags:
+        - install
+
+    - name: Stop and disable Docker service
+      ansible.builtin.systemd:
+        name: docker
+        enabled: false
+        state: stopped
+      tags:
+        - never
+        - remove
+
+    - name: Remove Docker Engine and plugins
+      ansible.builtin.dnf:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: absent
+      tags:
+        - never
+        - remove
+
+    - name: Remove Docker CE repository
+      ansible.builtin.yum_repository:
+        name: docker-ce-stable
+        state: absent
+      tags:
+        - never
+        - remove

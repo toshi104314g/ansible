@@ -1,0 +1,22 @@
+#cloud-config
+
+hostname: {{ vm_hostname }}
+
+users:
+  - name: toshiyuki
+    groups:
+      - wheel
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF32k5trHW/ONMOKYsAKks6XsPuHHC0BfuDQK6gZ8aYl toshiyuki@toshiyuki-Green-G2
+
+ssh_pwauth: false
+
+packages:
+  - openssh-server
+  - qemu-guest-agent
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - systemctl enable --now sshd

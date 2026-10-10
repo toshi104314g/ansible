@@ -1,0 +1,21 @@
+---
+vm_name_prefix: rocky9
+
+vm_ram: 4096
+vm_vcpus: 2
+vm_disk_size: 40G
+
+image_dir: /var/lib/libvirt/images
+vm_name_file: "{{ image_dir }}/{{ vm_name_prefix }}.name"
+vm_mac_file: "{{ image_dir }}/{{ vm_name_prefix }}.mac"
+
+cloud_image_url: "https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2"
+
+base_image: "{{ image_dir }}/Rocky-9-GenericCloud.latest.x86_64.qcow2"
+vm_disk: "{{ image_dir }}/{{ vm_name }}.qcow2"
+cloud_init_iso: "{{ image_dir }}/{{ vm_name }}-seed.iso"
+
+bridge_name: br0
+global_ipv6_prefix: "2409:"
+
+# Hostの/etc/hostsに登録する名前

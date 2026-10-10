@@ -1,0 +1,80 @@
+---
+- name: Destroy Rocky Linux 9 KVM VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Check saved VM name
+      ansible.builtin.stat:
+        path: "{{ vm_name_file }}"
+      register: vm_name_file_stat
+
+    - name: Read saved VM name
+      ansible.builtin.slurp:
+        src: "{{ vm_name_file }}"
+      register: saved_vm_name
+      when: vm_name_file_stat.stat.exists
+
+    - name: Set VM name for cleanup
+      ansible.builtin.set_fact:
+        vm_name: "{{ (saved_vm_name.content | default('') | b64decode | trim) or vm_name_prefix }}"
+
+    - name: Set VM hostname for cleanup
+      ansible.builtin.set_fact:
+        vm_hostname: "{{ vm_name }}"
+
+    - name: Remove VM from /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^\s*.*\s+{{ vm_hostname | regex_escape }}\s*$'
+        state: absent
+
+    - name: Check whether VM exists
+      ansible.builtin.command:
+        cmd: virsh dominfo "{{ vm_name }}"
+      register: vm_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Stop VM
+      ansible.builtin.command:
+        cmd: virsh destroy "{{ vm_name }}"
+      when: vm_exists.rc == 0
+      failed_when: false
+
+    - name: Remove VM definition and NVRAM
+      ansible.builtin.command:
+        cmd: virsh undefine "{{ vm_name }}" --nvram
+      when: vm_exists.rc == 0
+
+    - name: Remove VM disk
+      ansible.builtin.file:
+        path: "{{ vm_disk }}"
+        state: absent
+
+    - name: Remove cloud-init ISO
+      ansible.builtin.file:
+        path: "{{ cloud_init_iso }}"
+        state: absent
+
+    - name: Remove saved VM name
+      ansible.builtin.file:
+        path: "{{ vm_name_file }}"
+        state: absent
+
+    - name: Remove saved MAC address
+      ansible.builtin.file:
+        path: "{{ vm_mac_file }}"
+        state: absent
+
+    - name: Remove VM hostname from known_hosts
+      become: false
+      ansible.builtin.command:
+        cmd: ssh-keygen -R "{{ vm_hostname }}"
+      failed_when: false
+      changed_when: false

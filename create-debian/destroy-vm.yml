@@ -1,0 +1,72 @@
+---
+- name: Destroy Debian KVM VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+
+    # ------------------------------------------------------------
+    # Remove /etc/hosts entry
+    # ------------------------------------------------------------
+
+    - name: Remove VM from /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^\s*.*\s+{{ vm_hostname | regex_escape }}\s*$'
+        state: absent
+
+    # ------------------------------------------------------------
+    # Check VM
+    # ------------------------------------------------------------
+
+    - name: Check whether VM exists
+      ansible.builtin.command:
+        cmd: virsh dominfo "{{ vm_name }}"
+      register: vm_exists
+      failed_when: false
+      changed_when: false
+
+    # ------------------------------------------------------------
+    # Stop VM
+    # ------------------------------------------------------------
+
+    - name: Stop VM
+      ansible.builtin.command:
+        cmd: virsh destroy "{{ vm_name }}"
+      when: vm_exists.rc == 0
+      failed_when: false
+
+    # ------------------------------------------------------------
+    # Remove VM definition and UEFI NVRAM
+    # ------------------------------------------------------------
+
+    - name: Remove VM definition and NVRAM
+      ansible.builtin.command:
+        cmd: virsh undefine "{{ vm_name }}" --nvram
+      when: vm_exists.rc == 0
+
+    # ------------------------------------------------------------
+    # Remove VM files
+    # ------------------------------------------------------------
+
+    - name: Remove VM disk
+      ansible.builtin.file:
+        path: "{{ vm_disk }}"
+        state: absent
+
+    - name: Remove cloud-init ISO
+      ansible.builtin.file:
+        path: "{{ cloud_init_iso }}"
+        state: absent
+
+    - name: Remove VM hostname from known_hosts
+      become: false
+      ansible.builtin.command:
+        cmd: ssh-keygen -R "{{ vm_hostname }}"
+      failed_when: false
+      changed_when: false

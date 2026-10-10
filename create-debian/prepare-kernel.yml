@@ -1,0 +1,98 @@
+---
+- name: Prepare Debian kernel build environment
+  hosts: debian_kernel
+  gather_facts: false
+  become: true
+
+  vars:
+    kernel_version: "6.12.111"
+    kernel_src_dir: "/home/toshiyuki/kernel"
+    kernel_archive: "linux-{{ kernel_version }}.tar.xz"
+    kernel_url: "https://www.kernel.org/pub/linux/kernel/v6.x/{{ kernel_archive }}"
+    kernel_src: "{{ kernel_src_dir }}/linux-{{ kernel_version }}"
+
+  tasks:
+
+    # ------------------------------------------------------------
+    # Build dependencies
+    # ------------------------------------------------------------
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install kernel build dependencies
+      ansible.builtin.apt:
+        name:
+          - build-essential
+          - bc
+          - bison
+          - flex
+          - libssl-dev
+          - libelf-dev
+          - libdw-dev
+          - dwarves
+          - cpio
+          - rsync
+          - kmod
+          - fakeroot
+          - libncurses-dev
+          - xz-utils
+        state: present
+
+    # ------------------------------------------------------------
+    # Kernel source directory
+    # ------------------------------------------------------------
+
+    - name: Create kernel source directory
+      become: false
+      ansible.builtin.file:
+        path: "{{ kernel_src_dir }}"
+        state: directory
+        mode: "0755"
+
+    # ------------------------------------------------------------
+    # Download kernel source
+    # ------------------------------------------------------------
+
+    - name: Download Linux kernel source
+      become: false
+      ansible.builtin.get_url:
+        url: "{{ kernel_url }}"
+        dest: "{{ kernel_src_dir }}/{{ kernel_archive }}"
+        mode: "0644"
+
+    # ------------------------------------------------------------
+    # Extract kernel source
+    # ------------------------------------------------------------
+
+    - name: Check whether kernel source is already extracted
+      become: false
+      ansible.builtin.stat:
+        path: "{{ kernel_src }}/Makefile"
+      register: kernel_source
+
+    - name: Extract Linux kernel source
+      become: false
+      ansible.builtin.unarchive:
+        src: "{{ kernel_src_dir }}/{{ kernel_archive }}"
+        dest: "{{ kernel_src_dir }}"
+        remote_src: true
+      when: not kernel_source.stat.exists
+
+    # ------------------------------------------------------------
+    # Verify
+    # ------------------------------------------------------------
+
+    - name: Check kernel version
+      become: false
+      ansible.builtin.command:
+        cmd: make kernelversion
+        chdir: "{{ kernel_src }}"
+      register: kernel_version_result
+      changed_when: false
+
+    - name: Show kernel version
+      ansible.builtin.debug:
+        msg: "Kernel source version: {{ kernel_version_result.stdout }}"

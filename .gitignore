@@ -1,0 +1,15 @@
+# Ansible
+*.retry
+.ansible/
+ansible.log
+
+# Local inventories
+create-debian/inventory.ini
+create-rocky9/inventory.ini
+
+# Personal cloud-init configuration
+create-debian/files/user-data
+
+# Generated VM artifacts, if stored in this repository
+*.qcow2
+*.iso

@@ -1,0 +1,315 @@
+---
+- name: Create Rocky Linux 9 KVM VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+
+  vars_files:
+    - vars.yml
+
+  collections:
+    - community.libvirt
+
+  tasks:
+
+    # ------------------------------------------------------------
+    # Check required commands
+    # ------------------------------------------------------------
+
+    - name: Check qemu-img
+      ansible.builtin.command:
+        cmd: which qemu-img
+      changed_when: false
+
+    - name: Check cloud-localds
+      ansible.builtin.command:
+        cmd: which cloud-localds
+      changed_when: false
+
+    - name: Check virt-install
+      ansible.builtin.command:
+        cmd: which virt-install
+      changed_when: false
+
+    # ------------------------------------------------------------
+    # Rocky Linux 9 cloud image
+    # ------------------------------------------------------------
+
+    - name: Ensure libvirt image directory exists
+      ansible.builtin.file:
+        path: "{{ image_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Check saved VM name
+      ansible.builtin.stat:
+        path: "{{ vm_name_file }}"
+      register: vm_name_file_stat
+
+    - name: Read saved VM name
+      ansible.builtin.slurp:
+        src: "{{ vm_name_file }}"
+      register: saved_vm_name
+      when: vm_name_file_stat.stat.exists
+
+    - name: Reuse saved VM name
+      ansible.builtin.set_fact:
+        vm_name: "{{ saved_vm_name.content | b64decode | trim }}"
+      when: vm_name_file_stat.stat.exists
+
+    - name: Generate random VM name
+      ansible.builtin.set_fact:
+        vm_name: "{{ vm_name_prefix }}-{{ lookup('password', '/dev/null', chars='ascii_lowercase,digits', length=8) }}"
+      when: not vm_name_file_stat.stat.exists
+
+    - name: Check whether generated VM name is already in use
+      ansible.builtin.command:
+        cmd: virsh dominfo "{{ vm_name }}"
+      register: generated_vm_exists
+      failed_when: false
+      changed_when: false
+      when: not vm_name_file_stat.stat.exists
+
+    - name: Fail if generated VM name is already in use
+      ansible.builtin.fail:
+        msg: "Generated VM name is already in use: {{ vm_name }}"
+      when:
+        - not vm_name_file_stat.stat.exists
+        - generated_vm_exists.rc == 0
+
+    - name: Save VM name
+      ansible.builtin.copy:
+        content: "{{ vm_name }}\n"
+        dest: "{{ vm_name_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: not vm_name_file_stat.stat.exists
+
+    - name: Set VM hostname
+      ansible.builtin.set_fact:
+        vm_hostname: "{{ vm_name }}"
+
+    - name: Render Ansible inventory
+      ansible.builtin.template:
+        src: inventory.ini.j2
+        dest: "{{ playbook_dir }}/inventory.ini"
+        mode: "0644"
+
+    - name: Check saved MAC address
+      ansible.builtin.stat:
+        path: "{{ vm_mac_file }}"
+      register: vm_mac_file_stat
+
+    - name: Read saved MAC address
+      ansible.builtin.slurp:
+        src: "{{ vm_mac_file }}"
+      register: saved_vm_mac
+      when: vm_mac_file_stat.stat.exists
+
+    - name: Reuse saved MAC address
+      ansible.builtin.set_fact:
+        vm_mac: "{{ saved_vm_mac.content | b64decode | trim }}"
+      when: vm_mac_file_stat.stat.exists
+
+    - name: Generate random MAC address
+      ansible.builtin.set_fact:
+        vm_mac: "52:54:00:{{ lookup('password', '/dev/null', chars='0123456789abcdef', length=6) | regex_findall('..') | join(':') }}"
+      when: not vm_mac_file_stat.stat.exists
+
+    - name: Check whether generated MAC address is already in use
+      ansible.builtin.shell:
+        cmd: |
+          for domain in $(virsh list --all --name); do
+            virsh domiflist "$domain" | awk 'NR > 2 { print $5 }'
+          done | grep -Fx "{{ vm_mac }}"
+      register: generated_vm_mac_exists
+      failed_when: false
+      changed_when: false
+      when: not vm_mac_file_stat.stat.exists
+
+    - name: Fail if generated MAC address is already in use
+      ansible.builtin.fail:
+        msg: "Generated MAC address is already in use: {{ vm_mac }}"
+      when:
+        - not vm_mac_file_stat.stat.exists
+        - generated_vm_mac_exists.rc == 0
+
+    - name: Save MAC address
+      ansible.builtin.copy:
+        content: "{{ vm_mac }}\n"
+        dest: "{{ vm_mac_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: not vm_mac_file_stat.stat.exists
+
+    - name: Download Rocky Linux 9 cloud image
+      ansible.builtin.get_url:
+        url: "{{ cloud_image_url }}"
+        dest: "{{ base_image }}"
+        mode: "0644"
+        force: false
+
+    # ------------------------------------------------------------
+    # VM disk
+    # ------------------------------------------------------------
+
+    - name: Check VM disk
+      ansible.builtin.stat:
+        path: "{{ vm_disk }}"
+      register: vm_disk_stat
+
+    - name: Create VM qcow2 disk
+      ansible.builtin.command:
+        cmd: >
+          qemu-img create
+          -f qcow2
+          -F qcow2
+          -b "{{ base_image }}"
+          "{{ vm_disk }}"
+      when: not vm_disk_stat.stat.exists
+
+    - name: Resize VM disk
+      ansible.builtin.command:
+        cmd: qemu-img resize "{{ vm_disk }}" "{{ vm_disk_size }}"
+      when: not vm_disk_stat.stat.exists
+
+    # ------------------------------------------------------------
+    # cloud-init
+    # ------------------------------------------------------------
+
+    - name: Render cloud-init network config
+      ansible.builtin.template:
+        src: network-config.j2
+        dest: "/tmp/{{ vm_name }}-network-config"
+        mode: "0644"
+
+    - name: Render cloud-init user-data
+      ansible.builtin.template:
+        src: user-data.j2
+        dest: "/tmp/{{ vm_name }}-user-data"
+        mode: "0644"
+
+    - name: Render cloud-init meta-data
+      ansible.builtin.template:
+        src: meta-data.j2
+        dest: "/tmp/{{ vm_name }}-meta-data"
+        mode: "0644"
+
+    - name: Check cloud-init ISO
+      ansible.builtin.stat:
+        path: "{{ cloud_init_iso }}"
+      register: cloud_init_iso_stat
+
+    - name: Create cloud-init seed ISO
+      ansible.builtin.command:
+        cmd: >
+          cloud-localds
+          --network-config=/tmp/{{ vm_name }}-network-config
+          "{{ cloud_init_iso }}"
+          /tmp/{{ vm_name }}-user-data
+          /tmp/{{ vm_name }}-meta-data
+      when: not cloud_init_iso_stat.stat.exists
+
+    # ------------------------------------------------------------
+    # VM creation
+    # ------------------------------------------------------------
+
+    - name: Check whether VM exists
+      ansible.builtin.command:
+        cmd: virsh dominfo "{{ vm_name }}"
+      register: vm_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Create Rocky Linux 9 VM
+      ansible.builtin.command:
+        cmd: >
+          virt-install
+          --name "{{ vm_name }}"
+          --memory "{{ vm_ram }}"
+          --vcpus "{{ vm_vcpus }}"
+          --disk path="{{ vm_disk }}",format=qcow2,bus=virtio
+          --disk path="{{ cloud_init_iso }}",device=cdrom
+          --network bridge="{{ bridge_name }}",model=virtio,mac="{{ vm_mac }}"
+          --os-variant rocky9
+          --boot uefi
+          --graphics none
+          --console pty,target_type=serial
+          --import
+          --noautoconsole
+      when: vm_exists.rc != 0
+
+    # ------------------------------------------------------------
+    # Start VM
+    # ------------------------------------------------------------
+
+    - name: Ensure Rocky Linux 9 VM is running
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        state: running
+
+    # ------------------------------------------------------------
+    # Wait for QEMU Guest Agent
+    # ------------------------------------------------------------
+
+    - name: Wait for QEMU Guest Agent
+      ansible.builtin.command:
+        cmd: virsh domifaddr "{{ vm_name }}" --source agent
+      register: guest_addresses
+      until: guest_addresses.rc == 0 and global_ipv6_prefix in guest_addresses.stdout
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    # ------------------------------------------------------------
+    # Get IPv6 address
+    # ------------------------------------------------------------
+
+    - name: Extract IPv6 addresses
+      ansible.builtin.set_fact:
+        vm_ipv6_addresses: >-
+          {{
+            guest_addresses.stdout
+            | regex_findall('(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f:]+/[0-9]+')
+          }}
+
+    - name: Select global IPv6 address
+      ansible.builtin.set_fact:
+        vm_ipv6_address: >-
+          {{
+            vm_ipv6_addresses
+            | select('search', '^' ~ global_ipv6_prefix)
+            | map('regex_replace', '/[0-9]+$', '')
+            | list
+            | first
+            | default('')
+          }}
+
+    - name: Fail if global IPv6 address was not detected
+      ansible.builtin.fail:
+        msg: |
+          Could not detect global IPv6 address of {{ vm_name }}.
+
+          Detected IPv6 addresses:
+          {{ vm_ipv6_addresses | join('\n') }}
+      when: vm_ipv6_address is not defined or vm_ipv6_address == ''
+
+    - name: Show detected global IPv6 address
+      ansible.builtin.debug:
+        msg: "{{ vm_name }} IPv6 address: {{ vm_ipv6_address }}"
+
+    # ------------------------------------------------------------
+    # /etc/hosts
+    # ------------------------------------------------------------
+
+    - name: Add VM to /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^\s*.*\s+{{ vm_hostname | regex_escape }}\s*$'
+        line: "{{ vm_ipv6_address }} {{ vm_hostname }}"
+        state: present
