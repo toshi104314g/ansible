@@ -1,0 +1,29 @@
+---
+- name: Configure existing Ubuntu UTM guests from the selected inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  vars_files:
+    - ../vars.yml
+
+  tasks:
+    - name: Load the UTM provisioning inventory
+      ansible.builtin.import_tasks: load-provisioning-config.yml
+      tags:
+        - utm_inventory
+        - hosts_file
+
+    - name: Prepare and identify existing inventory guests
+      ansible.builtin.import_tasks: prepare-existing.yml
+      when: utm_existing_vms | length > 0
+
+    - name: Configure and verify existing guest network identities
+      ansible.builtin.import_tasks: configure-existing.yml
+      when: utm_existing_vms | length > 0
+
+    - name: Update the Mac hosts file
+      ansible.builtin.import_tasks: update-hosts.yml
+      tags:
+        - hosts_file

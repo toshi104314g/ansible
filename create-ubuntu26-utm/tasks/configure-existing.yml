@@ -1,0 +1,103 @@
+---
+- name: Configure existing guest hostname and static IPv4 over IPv6 SSH
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "{{ utm_guest_ssh_user }}@{{ utm_existing_ipv6[item.name] }}"
+      - sudo
+      - -n
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      changed=0
+      if [ "$(hostname)" != {{ item.hostname | quote }} ]; then
+        hostnamectl set-hostname {{ item.hostname | quote }}
+        changed=1
+      fi
+      interface={{ utm_network_connection | quote }}
+      mac_address=$(cat "/sys/class/net/$interface/address")
+      netplan_file=/etc/netplan/99-ansible-utm.yaml
+      temp_file=$(mktemp)
+      trap 'rm -f "$temp_file"' EXIT
+      cat > "$temp_file" <<NETPLAN
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+          {{ utm_network_connection | to_json }}:
+            match:
+              macaddress: {{ '${mac_address}' }}
+            set-name: {{ utm_network_connection | to_json }}
+            dhcp4: false
+            dhcp6: false
+            accept-ra: true
+            addresses: [{{ (item.ipv4_address ~ '/' ~ utm_ipv4_prefix_length) | to_json }}]
+            routes:
+              - to: default
+                via: {{ utm_ipv4_gateway | to_json }}
+            nameservers:
+              addresses: {{ utm_ipv4_dns_servers | to_json }}
+      NETPLAN
+      if ! cmp -s "$temp_file" "$netplan_file"; then
+        install -m 600 "$temp_file" "$netplan_file"
+        netplan generate
+        netplan apply
+        changed=1
+      fi
+      if [ "$changed" -eq 1 ]; then
+        echo guest-configured
+      fi
+  register: utm_existing_config_result
+  changed_when: "'guest-configured' in utm_existing_config_result.stdout"
+  loop: "{{ utm_existing_vms }}"
+
+- name: Verify existing guest hostname and static IPv4 over IPv6
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "{{ utm_guest_ssh_user }}@{{ utm_existing_ipv6[item.name] }}"
+      - sudo
+      - -n
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      test "$(hostname)" = {{ item.hostname | quote }}
+      grep -Eq '^[[:space:]]+dhcp4: false$' /etc/netplan/99-ansible-utm.yaml
+      grep -Fq {{ (item.ipv4_address ~ '/' ~ utm_ipv4_prefix_length) | quote }} /etc/netplan/99-ansible-utm.yaml
+      test "$(ip -4 -o address show dev {{ utm_network_connection | quote }} | awk '{print $4}')" = {{ (item.ipv4_address ~ '/' ~ utm_ipv4_prefix_length) | quote }}
+      ip -6 address show dev {{ utm_network_connection | quote }} scope global | grep -q 'inet6'
+  register: utm_existing_verification
+  changed_when: false
+  until: utm_existing_verification.rc == 0
+  retries: "{{ utm_poll_retries }}"
+  delay: "{{ utm_poll_delay }}"
+  loop: "{{ utm_existing_vms }}"
+
+- name: Show configured existing inventory guests
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.hostname }} configured with static IPv4
+      {{ item.ipv4_address }}/{{ utm_ipv4_prefix_length }} and IPv6 SLAAC.
+  loop: "{{ utm_existing_vms }}"

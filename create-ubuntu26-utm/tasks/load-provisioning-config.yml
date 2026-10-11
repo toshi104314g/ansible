@@ -1,0 +1,157 @@
+---
+- name: Require exactly one inventory source selected with -i
+  ansible.builtin.assert:
+    that:
+      - ansible_inventory_sources is defined
+      - ansible_inventory_sources | length == 1
+    fail_msg: >-
+      Specify exactly one Ubuntu provisioning inventory file with -i.
+      No default inventory is used.
+
+- name: Record the inventory file selected with -i
+  ansible.builtin.set_fact:
+    inventory_path: "{{ ansible_inventory_sources | first }}"
+
+- name: Check that the UTM inventory exists
+  ansible.builtin.stat:
+    path: "{{ inventory_path }}"
+  register: utm_inventory_file
+
+- name: Require the UTM inventory
+  ansible.builtin.assert:
+    that:
+      - utm_inventory_file.stat.exists
+      - utm_inventory_file.stat.isreg
+    fail_msg: >-
+      The selected UTM inventory '{{ inventory_path }}' is not a regular file.
+      Pass a valid inventory file with -i.
+
+- name: Parse the UTM inventory
+  ansible.builtin.command:
+    argv:
+      - ansible-inventory
+      - --inventory
+      - "{{ inventory_path }}"
+      - --list
+  register: utm_inventory_result
+  changed_when: false
+
+- name: Record UTM inventory host variables
+  ansible.builtin.set_fact:
+    utm_inventory_hostvars: "{{ (utm_inventory_result.stdout | from_json)['_meta']['hostvars'] }}"
+
+- name: Require inventory hosts
+  ansible.builtin.assert:
+    that:
+      - utm_inventory_hostvars | length > 0
+    fail_msg: "The provisioning inventory has no hosts."
+
+- name: Validate required UTM inventory fields
+  ansible.builtin.assert:
+    that:
+      - item.value.utm_vm_name is defined
+      - item.value.utm_provision is defined
+      - item.value.utm_provision in ['clone', 'existing']
+      - item.value.ansible_host is defined
+      - item.value.ansible_host is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+      - >-
+        item.value.ansible_host.split('.')
+        | map('int')
+        | select('gt', 255)
+        | list
+        | length == 0
+    fail_msg: >-
+      Inventory host '{{ item.key }}' must define a valid IPv4 ansible_host,
+      utm_vm_name, and utm_provision (clone or existing).
+  loop: "{{ utm_inventory_hostvars | dict2items }}"
+
+- name: Require unique guest names, UTM names, and IPv4 addresses
+  ansible.builtin.assert:
+    that:
+      - (utm_inventory_hostvars.keys() | list | unique | length) == (utm_inventory_hostvars | length)
+      - >-
+        (utm_inventory_hostvars.values() | map(attribute='utm_vm_name') | list | unique | length)
+        == (utm_inventory_hostvars | length)
+      - >-
+        (utm_inventory_hostvars.values() | map(attribute='ansible_host') | list | unique | length)
+        == (utm_inventory_hostvars | length)
+      - >-
+        not (utm_require_ssh_alias | default(true)) or
+        utm_inventory_hostvars.values()
+        | selectattr('utm_provision', 'equalto', 'existing')
+        | selectattr('utm_ssh_alias', 'undefined')
+        | list
+        | length == 0
+    fail_msg: >-
+      Inventory hostnames, UTM VM names, and IPv4 addresses must be unique;
+      existing guests must define utm_ssh_alias when provisioning them.
+
+- name: Record common settings from inventory
+  ansible.builtin.set_fact:
+    utm_inventory_settings: "{{ utm_inventory_hostvars.values() | first }}"
+
+- name: Set guest network and template configuration from inventory
+  ansible.builtin.set_fact:
+    utm_template_name: "{{ utm_inventory_settings.utm_template_name }}"
+    utm_network_connection: "{{ utm_inventory_settings.utm_network_connection }}"
+    utm_global_ipv6_prefix: "{{ utm_inventory_settings.utm_global_ipv6_prefix }}"
+    utm_ipv4_prefix_length: "{{ utm_inventory_settings.utm_ipv4_prefix_length }}"
+    utm_ipv4_gateway: "{{ utm_inventory_settings.utm_ipv4_gateway }}"
+    utm_ipv4_dns_servers: "{{ utm_inventory_settings.utm_ipv4_dns_servers }}"
+
+- name: Require common UTM settings in inventory
+  ansible.builtin.assert:
+    that:
+      - utm_template_name is defined
+      - utm_network_connection is defined
+      - utm_global_ipv6_prefix is defined
+      - utm_ipv4_prefix_length is defined
+      - utm_ipv4_gateway is defined
+      - utm_ipv4_dns_servers is defined
+      - utm_ipv4_prefix_length | int >= 1
+      - utm_ipv4_prefix_length | int <= 32
+      - utm_ipv4_dns_servers | length > 0
+      - utm_template_name not in (utm_inventory_hostvars.values() | map(attribute='utm_vm_name') | list)
+      - (utm_inventory_hostvars.values() | map(attribute='utm_template_name') | unique | length) == 1
+      - (utm_inventory_hostvars.values() | map(attribute='utm_network_connection') | unique | length) == 1
+      - (utm_inventory_hostvars.values() | map(attribute='utm_global_ipv6_prefix') | unique | length) == 1
+      - (utm_inventory_hostvars.values() | map(attribute='utm_ipv4_prefix_length') | unique | length) == 1
+      - (utm_inventory_hostvars.values() | map(attribute='utm_ipv4_gateway') | unique | length) == 1
+      - (utm_inventory_hostvars.values() | map(attribute='utm_ipv4_dns_servers') | unique | length) == 1
+    fail_msg: >-
+      Define utm_template_name, utm_network_connection, utm_global_ipv6_prefix,
+      utm_ipv4_prefix_length, utm_ipv4_gateway, and utm_ipv4_dns_servers under
+      all.vars in the UTM inventory.
+
+- name: Initialize inventory guest lists
+  ansible.builtin.set_fact:
+    utm_clone_vms: []
+    utm_existing_vms: []
+
+- name: Build clone guest list from inventory
+  ansible.builtin.set_fact:
+    utm_clone_vms: >-
+      {{
+        utm_clone_vms + [{
+          'hostname': item.key,
+          'name': item.value.utm_vm_name,
+          'ipv4_address': item.value.ansible_host
+        }]
+      }}
+  loop: "{{ utm_inventory_hostvars | dict2items }}"
+  when: item.value.utm_provision == 'clone'
+
+- name: Build existing guest list from inventory
+  ansible.builtin.set_fact:
+    utm_existing_vms: >-
+      {{
+        utm_existing_vms + [{
+          'hostname': item.key,
+          'name': item.value.utm_vm_name,
+          'ipv4_address': item.value.ansible_host,
+          'ssh_alias': item.value.utm_ssh_alias,
+          'expected_hostname': item.value.utm_expected_hostname | default(item.key)
+        }]
+      }}
+  loop: "{{ utm_inventory_hostvars | dict2items }}"
+  when: item.value.utm_provision == 'existing'

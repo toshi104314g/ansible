@@ -1,0 +1,64 @@
+---
+- name: Check status of registered inventory virtual machines
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - status
+      - "{{ item.utm_name }}"
+  register: utm_delete_vm_status
+  changed_when: false
+  loop: "{{ utm_registered_delete_targets }}"
+
+- name: Stop running inventory virtual machines
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - stop
+      - "{{ item.item.utm_name }}"
+  loop: "{{ utm_delete_vm_status.results }}"
+  when: item.stdout | trim == 'started'
+
+- name: Wait for inventory virtual machines to stop
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - status
+      - "{{ item.utm_name }}"
+  register: utm_delete_vm_stopped
+  changed_when: false
+  until: utm_delete_vm_stopped.stdout | trim == 'stopped'
+  retries: "{{ utm_poll_retries }}"
+  delay: "{{ utm_poll_delay }}"
+  loop: "{{ utm_registered_delete_targets }}"
+
+- name: Delete registered inventory virtual machines
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - delete
+      - "{{ item.utm_name }}"
+  loop: "{{ utm_registered_delete_targets }}"
+
+- name: Confirm inventory virtual machines are absent from UTM
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - list
+  register: utm_delete_verification
+  changed_when: false
+  when: utm_registered_delete_targets | length > 0
+
+- name: Require deleted virtual machines to be absent
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.utm_name not in
+        (
+          utm_delete_verification.stdout_lines
+          | map('regex_replace', '^\S+\s+\S+\s+', '')
+          | reject('equalto', 'Name')
+          | list
+        )
+    fail_msg: "UTM VM '{{ item.utm_name }}' is still registered after deletion."
+  loop: "{{ utm_registered_delete_targets }}"
+  when: utm_registered_delete_targets | length > 0

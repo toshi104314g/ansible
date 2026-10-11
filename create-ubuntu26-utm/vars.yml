@@ -1,0 +1,9 @@
+---
+utmctl_command: utmctl
+utm_guest_ssh_user: toshiyuki
+
+utm_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519"
+utm_ssh_known_hosts_file: "{{ lookup('env', 'HOME') }}/.ssh/known_hosts.ansible-utm"
+
+utm_poll_retries: 30
+utm_poll_delay: 5

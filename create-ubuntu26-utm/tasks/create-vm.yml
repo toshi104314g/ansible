@@ -1,0 +1,41 @@
+---
+- name: Provision Ubuntu UTM VMs from the selected inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  vars_files:
+    - ../vars.yml
+
+  tasks:
+    - name: Load the UTM provisioning inventory
+      ansible.builtin.import_tasks: load-provisioning-config.yml
+      tags:
+        - utm_inventory
+        - hosts_file
+
+    - name: Verify the template is ready for cloning
+      ansible.builtin.import_tasks: prepare-template.yml
+      when: utm_clone_vms | length > 0
+
+    - name: Clone and start the configured virtual machines
+      ansible.builtin.import_tasks: clone-vms.yml
+      when: utm_clone_vms | length > 0
+
+    - name: Discover addresses and validate provisioning requirements
+      ansible.builtin.import_tasks: discover-vms.yml
+      when: utm_clone_vms | length > 0
+
+    - name: Initialize cloned guest identities
+      ansible.builtin.import_tasks: initialize-vms.yml
+      when: utm_clone_vms | length > 0
+
+    - name: Configure static guest networking
+      ansible.builtin.import_tasks: configure-network.yml
+      when: utm_clone_vms | length > 0
+
+    - name: Update the Mac hosts file
+      ansible.builtin.import_tasks: update-hosts.yml
+      tags:
+        - hosts_file

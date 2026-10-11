@@ -1,0 +1,16 @@
+---
+- name: Create or configure UTM VMs
+  ansible.builtin.import_playbook: tasks/create-vm.yml
+  tags:
+    - create
+
+- name: Configure existing UTM VMs
+  ansible.builtin.import_playbook: tasks/configure-existing-vms.yml
+  tags:
+    - create
+
+- name: Delete inventory UTM VMs
+  ansible.builtin.import_playbook: tasks/delete-vms.yml
+  tags:
+    - delete
+    - never

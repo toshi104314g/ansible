@@ -1,0 +1,43 @@
+- name: List registered UTM virtual machines
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - list
+  register: utm_vm_list
+  changed_when: false
+
+- name: Parse registered UTM virtual machine names
+  ansible.builtin.set_fact:
+    utm_vm_names: >-
+      {{
+        utm_vm_list.stdout_lines
+        | map('regex_replace', '^\S+\s+\S+\s+', '')
+        | reject('equalto', 'Name')
+        | list
+      }}
+
+- name: Verify clean Ubuntu template is registered
+  ansible.builtin.assert:
+    that:
+      - utm_template_name in utm_vm_names
+    fail_msg: >-
+      UTM template '{{ utm_template_name }}' was not found.
+      Create a clean Ubuntu 26.04 template in UTM first; see README.md.
+
+- name: Check template status
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - status
+      - "{{ utm_template_name }}"
+  register: utm_template_status
+  changed_when: false
+
+- name: Require template to be stopped before cloning
+  ansible.builtin.assert:
+    that:
+      - utm_template_status.stdout | trim == 'stopped'
+    fail_msg: >-
+      UTM template '{{ utm_template_name }}' must be stopped before cloning.
+      Stop it in UTM and rerun the playbook. The playbook does not start or
+      modify the template.

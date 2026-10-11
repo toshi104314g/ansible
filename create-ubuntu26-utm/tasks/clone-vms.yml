@@ -1,0 +1,59 @@
+    - name: Clone missing UTM virtual machines
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - clone
+          - "{{ utm_template_name }}"
+          - --name
+          - "{{ item.name }}"
+      loop: "{{ utm_clone_vms }}"
+      when: item.name not in utm_vm_names
+      register: utm_clone_results
+
+    - name: Wait for cloned UTM virtual machines to be registered
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - list
+      register: utm_clone_list
+      changed_when: false
+      until: >-
+        utm_clone_list.stdout_lines
+        | select('search', '\s' ~ (item.name | regex_escape) ~ '$')
+        | list
+        | length > 0
+      retries: "{{ utm_poll_retries }}"
+      delay: "{{ utm_poll_delay }}"
+      loop: "{{ utm_clone_vms }}"
+
+    - name: Check cloned virtual machine status
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - status
+          - "{{ item.name }}"
+      register: utm_start_status
+      changed_when: false
+      loop: "{{ utm_clone_vms }}"
+
+    - name: Start stopped UTM virtual machines
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - start
+          - "{{ item.item.name }}"
+      loop: "{{ utm_start_status.results }}"
+      when: item.stdout | trim != 'started'
+
+    - name: Wait for UTM virtual machines to start
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - status
+          - "{{ item.name }}"
+      register: utm_running_status
+      changed_when: false
+      until: utm_running_status.stdout | trim == 'started'
+      retries: "{{ utm_poll_retries }}"
+      delay: "{{ utm_poll_delay }}"
+      loop: "{{ utm_clone_vms }}"

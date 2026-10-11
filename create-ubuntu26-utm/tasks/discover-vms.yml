@@ -1,0 +1,76 @@
+    - name: Wait for UTM virtual machine global IPv6 addresses
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - ip-address
+          - "{{ item.name }}"
+      register: utm_ip_results
+      changed_when: false
+      until: >-
+        utm_ip_results.stdout
+        | regex_search('(?m)^' ~ utm_global_ipv6_prefix ~ '[0-9A-Fa-f:]+$')
+        is not none
+      retries: "{{ utm_poll_retries }}"
+      delay: "{{ utm_poll_delay }}"
+      loop: "{{ utm_clone_vms }}"
+
+    - name: Record UTM virtual machine global IPv6 addresses
+      ansible.builtin.set_fact:
+        utm_vm_ipv6: >-
+          {{
+            (utm_vm_ipv6 | default({}))
+            | combine({
+                item.item.name:
+                  (
+                    item.stdout
+                    | regex_findall('(?m)^' ~ utm_global_ipv6_prefix ~ '[0-9A-Fa-f:]+$')
+                    | first
+                  )
+              })
+          }}
+      loop: "{{ utm_ip_results.results }}"
+
+    - name: Ensure configured static IPv4 addresses are unique and valid
+      ansible.builtin.assert:
+        that:
+          - (utm_inventory_hostvars.values() | map(attribute='ansible_host') | list | unique | length) == (utm_inventory_hostvars | length)
+          - (utm_inventory_hostvars.values() | map(attribute='ansible_host') | select('match', '^[0-9]{1,3}(\.[0-9]{1,3}){3}$') | list | length) == (utm_inventory_hostvars | length)
+        fail_msg: >-
+          Static IPv4 addresses must be unique and valid. Check the
+          ansible_host values in the inventory.
+
+    - name: Verify SSH private key exists
+      ansible.builtin.stat:
+        path: "{{ utm_ssh_private_key_file }}"
+      register: utm_ssh_private_key
+
+    - name: Require SSH private key
+      ansible.builtin.assert:
+        that:
+          - utm_ssh_private_key.stat.exists
+          - utm_ssh_private_key.stat.isreg
+        fail_msg: "SSH private key not found: {{ utm_ssh_private_key_file }}"
+
+    - name: Wait for SSH access to cloned Ubuntu virtual machines
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -6
+          - -i
+          - "{{ utm_ssh_private_key_file }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - ConnectTimeout=5
+          - -o
+          - StrictHostKeyChecking=accept-new
+          - -o
+          - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+          - "{{ utm_guest_ssh_user }}@{{ utm_vm_ipv6[item.name] }}"
+          - /usr/bin/true
+      register: utm_ssh_check
+      changed_when: false
+      until: utm_ssh_check.rc == 0
+      retries: "{{ utm_poll_retries }}"
+      delay: "{{ utm_poll_delay }}"
+      loop: "{{ utm_clone_vms }}"
