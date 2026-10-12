@@ -91,6 +91,35 @@
   delay: "{{ kvm_poll_delay }}"
   loop: "{{ kvm_clone_vms }}"
 
+- name: Wait for cloned guests to receive IPv6 router advertisements
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
+      - bash
+      - -s
+    stdin: |
+      set -e
+      ip -6 -o address show dev {{ ('eth0' if item.os == 'rocky9' else 'ens3') | quote }} scope global |
+        grep -q 'scope global dynamic'
+      ip -6 route show default | grep -q 'proto ra'
+  register: kvm_ipv6_readiness
+  changed_when: false
+  until: kvm_ipv6_readiness.rc == 0
+  retries: "{{ kvm_poll_retries }}"
+  delay: "{{ kvm_poll_delay }}"
+  loop: "{{ kvm_clone_vms }}"
+
 - name: Verify cloned guest hostnames and static IPv4 addresses
   ansible.builtin.command:
     argv:
@@ -109,7 +138,7 @@
       - >-
         {{ 'sudo -n bash -s' if item.os == 'ubuntu26' else 'bash -s' }}
     stdin: |
-      set -e
+      set -ex
       test "$(hostname)" = {{ item.hostname | quote }}
       ip -4 -o address show |
         awk '{print $4}' |

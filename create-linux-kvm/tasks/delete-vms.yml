@@ -17,6 +17,7 @@
           This permanently deletes the KVM VMs listed in the selected inventory.
           Type DELETE to continue
       register: kvm_delete_confirmation
+      when: not (kvm_delete_confirmed | default(false) | bool)
       tags:
         - delete
         - never
@@ -24,7 +25,9 @@
     - name: Require explicit deletion confirmation
       ansible.builtin.assert:
         that:
-          - kvm_delete_confirmation.user_input == 'DELETE'
+          - >-
+            (kvm_delete_confirmed | default(false) | bool)
+            or (kvm_delete_confirmation.user_input | default('') == 'DELETE')
         fail_msg: "Deletion cancelled. The required confirmation is DELETE."
       tags:
         - delete

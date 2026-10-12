@@ -4,6 +4,8 @@
   connection: local
   gather_facts: false
   become: false
+  tags:
+    - always
 
   vars:
     kvm_controller_ssh_alias: ubuntu
@@ -41,6 +43,16 @@
         kvm_selected_guest_hostvars: >-
           {{ (kvm_selected_inventory_result.stdout | from_json)['_meta']['hostvars'] }}
 
+    - name: Determine the requested KVM operation
+      ansible.builtin.set_fact:
+        kvm_wrapper_action: "{{ 'delete' if 'delete' in ansible_run_tags else 'create' }}"
+        kvm_wrapper_run_remote: >-
+          {{
+            'all' in ansible_run_tags
+            or 'create' in ansible_run_tags
+            or 'delete' in ansible_run_tags
+          }}
+
     - name: Require at least one KVM guest
       ansible.builtin.assert:
         that:
@@ -66,6 +78,7 @@
       loop:
         - "{{ kvm_mac_ssh_private_key_file }}"
         - "{{ kvm_mac_ssh_public_key_file }}"
+      when: kvm_wrapper_action == 'create'
 
     - name: Require the Mac SSH private and public key files
       ansible.builtin.assert:
@@ -74,6 +87,7 @@
           - item.stat.isreg
         fail_msg: "Required Mac SSH key file not found: {{ item.item }}"
       loop: "{{ kvm_mac_ssh_key_stats.results }}"
+      when: kvm_wrapper_action == 'create'
 
     - name: Derive the public key from the Mac private key
       ansible.builtin.command:
@@ -85,6 +99,7 @@
       register: kvm_mac_derived_public_key
       changed_when: false
       no_log: true
+      when: kvm_wrapper_action == 'create'
 
     - name: Verify the Mac public key matches its private key
       ansible.builtin.assert:
@@ -94,10 +109,48 @@
             == lookup('ansible.builtin.file', kvm_mac_ssh_public_key_file).split()[:2]
         fail_msg: "The Mac SSH public key does not match the configured private key."
       no_log: true
+      when: kvm_wrapper_action == 'create'
+
+    - name: Confirm deletion of inventory KVM virtual machines
+      ansible.builtin.pause:
+        prompt: >-
+          This permanently deletes the KVM VMs listed in the selected inventory.
+          Type DELETE to continue
+      register: kvm_wrapper_delete_confirmation
+      when:
+        - kvm_wrapper_action == 'delete'
+        - kvm_wrapper_delete_confirmation_input | default('') != 'DELETE'
+
+    - name: Prompt for Ubuntu sudo password when Ubuntu hosts file will change
+      ansible.builtin.pause:
+        prompt: "Ubuntu KVM host sudo password"
+        echo: false
+      register: kvm_ubuntu_become_password_input
+      when:
+        - hostvars['localhost']['kvm_wrapper_run_remote'] | bool
+        - "'ubuntu_hosts_file' in ansible_run_tags"
+
+    - name: Store the Ubuntu sudo password for delegated hosts-file updates
+      ansible.builtin.set_fact:
+        kvm_ubuntu_become_password: "{{ kvm_ubuntu_become_password_input.user_input }}"
+      no_log: true
+      when:
+        - hostvars['localhost']['kvm_wrapper_run_remote'] | bool
+        - "'ubuntu_hosts_file' in ansible_run_tags"
+
+    - name: Require explicit deletion confirmation
+      ansible.builtin.assert:
+        that:
+          - >-
+            (kvm_wrapper_delete_confirmation_input | default('') == 'DELETE')
+            or (kvm_wrapper_delete_confirmation.user_input | default('') == 'DELETE')
+        fail_msg: "Deletion cancelled. The required confirmation is DELETE."
+      when: kvm_wrapper_action == 'delete'
 
     - name: Record the Mac public-key file path for remote staging
       ansible.builtin.set_fact:
         kvm_mac_ssh_public_key_file: "{{ kvm_mac_ssh_public_key_file }}"
+      when: kvm_wrapper_action == 'create'
 
     - name: Register the Ubuntu KVM host for SSH delegation
       ansible.builtin.add_host:
@@ -111,6 +164,8 @@
   connection: local
   gather_facts: false
   become: false
+  tags:
+    - always
   vars:
     kvm_controller_ssh_alias: ubuntu
 
@@ -121,6 +176,7 @@
         prefix: ansible-linux-kvm-
       register: kvm_remote_workspace
       delegate_to: kvm_remote_execution_host
+      when: hostvars['localhost']['kvm_wrapper_run_remote'] | bool
 
     - name: Stage inventory, playbook, and Mac public key on Ubuntu
       block:
@@ -144,18 +200,40 @@
             dest: "{{ kvm_remote_workspace.path }}/mac-id_ed25519.pub"
             mode: "0600"
           delegate_to: kvm_remote_execution_host
+          when: hostvars['localhost']['kvm_wrapper_action'] == 'create'
+
+        - name: Build the Ubuntu KVM playbook command
+          ansible.builtin.set_fact:
+            kvm_remote_playbook_argv: >-
+              {{
+                [
+                  '/usr/bin/ansible-playbook',
+                  '--inventory',
+                  kvm_remote_workspace.path ~ '/inventory.yml',
+                  kvm_remote_workspace.path ~ '/create-linux-kvm/create-linux-kvm.yml',
+                  '--tags',
+                  hostvars['localhost']['kvm_wrapper_action']
+                ]
+                + (
+                    ['--skip-tags', 'create']
+                    if hostvars['localhost']['kvm_wrapper_action'] == 'delete'
+                    else ['--skip-tags', 'hosts_file']
+                  )
+                + [
+                    '--extra-vars',
+                    {
+                      'kvm_additional_ssh_public_key_file':
+                        kvm_remote_workspace.path ~ '/mac-id_ed25519.pub'
+                        if hostvars['localhost']['kvm_wrapper_action'] == 'create' else '',
+                      'kvm_delete_confirmed':
+                        hostvars['localhost']['kvm_wrapper_action'] == 'delete'
+                    } | to_json
+                  ]
+              }}
 
         - name: Run the KVM playbook on Ubuntu using the Mac-selected inventory
           ansible.builtin.command:
-            argv:
-              - /usr/bin/ansible-playbook
-              - --inventory
-              - "{{ kvm_remote_workspace.path }}/inventory.yml"
-              - "{{ kvm_remote_workspace.path }}/create-linux-kvm/create-linux-kvm.yml"
-              - --skip-tags
-              - hosts_file
-              - --extra-vars
-              - "{{ {'kvm_additional_ssh_public_key_file': kvm_remote_workspace.path ~ '/mac-id_ed25519.pub'} | to_json }}"
+            argv: "{{ kvm_remote_playbook_argv }}"
           register: kvm_remote_playbook_result
           changed_when: true
           environment:
@@ -165,35 +243,115 @@
         - name: Report the Ubuntu KVM playbook result
           ansible.builtin.debug:
             var: kvm_remote_playbook_result.stdout_lines
+
+        - name: Update Ubuntu hosts entries for selected KVM guests
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
+            line: "{{ item.value.ansible_host }} {{ item.key }}"
+          loop: "{{ hostvars['localhost']['kvm_selected_guest_hostvars'] | dict2items }}"
+          become: true
+          delegate_to: kvm_remote_execution_host
+          vars:
+            ansible_become_password: "{{ hostvars['localhost']['kvm_ubuntu_become_password'] }}"
+          when:
+            - hostvars['localhost']['kvm_wrapper_action'] == 'create'
+            - "'ubuntu_hosts_file' in ansible_run_tags"
+
+        - name: Report Ubuntu hosts file updates
+          ansible.builtin.debug:
+            msg: >-
+              Added or updated Ubuntu /etc/hosts entries for
+              {{ hostvars['localhost']['kvm_selected_guest_hostvars'].keys() | list | join(', ') }}.
+          when:
+            - hostvars['localhost']['kvm_wrapper_action'] == 'create'
+            - "'ubuntu_hosts_file' in ansible_run_tags"
       always:
         - name: Remove the temporary Ubuntu workspace
           ansible.builtin.file:
             path: "{{ kvm_remote_workspace.path }}"
             state: absent
           delegate_to: kvm_remote_execution_host
+          when: hostvars['localhost']['kvm_wrapper_run_remote'] | bool
+      when: hostvars['localhost']['kvm_wrapper_run_remote'] | bool
 
-- name: Add the deployed VMs to the Mac hosts file
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  become: true
-  tags:
-    - hosts_file
-
-  tasks:
     - name: Update Mac hosts entries for selected KVM guests
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
         line: "{{ item.value.ansible_host }} {{ item.key }}"
       loop: "{{ hostvars['localhost']['kvm_selected_guest_hostvars'] | dict2items }}"
-      tags:
-        - hosts_file
+      become: true
+      when: hostvars['localhost']['kvm_wrapper_action'] == 'create'
+      register: kvm_mac_hosts_update_result
+
+    - name: Verify Mac hosts entries were written
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/grep
+          - -F
+          - -x
+          - --
+          - "{{ item.value.ansible_host }} {{ item.key }}"
+          - /etc/hosts
+      loop: "{{ hostvars['localhost']['kvm_selected_guest_hostvars'] | dict2items }}"
+      register: kvm_mac_hosts_verification
+      changed_when: false
+      failed_when: false
+      when: hostvars['localhost']['kvm_wrapper_action'] == 'create'
+
+    - name: Require selected guest entries in Mac hosts file
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+        fail_msg: >-
+          Expected /etc/hosts to contain '{{ item.item.value.ansible_host }} {{ item.item.key }}',
+          but it was not found after the update task. Check the task output and Mac sudo privileges.
+      loop: "{{ kvm_mac_hosts_verification.results | default([]) }}"
+      when: hostvars['localhost']['kvm_wrapper_action'] == 'create'
 
     - name: Report Mac hosts file updates
       ansible.builtin.debug:
         msg: >-
-          Added or updated /etc/hosts entries for
+          Verified /etc/hosts entries for
           {{ hostvars['localhost']['kvm_selected_guest_hostvars'].keys() | list | join(', ') }}.
+          Update task results: {{ kvm_mac_hosts_update_result.results
+            | map(attribute='changed') | list }}.
+      when: hostvars['localhost']['kvm_wrapper_action'] == 'create'
+
+- name: Remove deleted VMs from the Ubuntu and Mac hosts files
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  tags:
+    - delete
+    - never
+
+  tasks:
+    - name: Remove deleted KVM guest entries from Ubuntu hosts file
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
+        state: absent
+      loop: "{{ hostvars['localhost']['kvm_selected_guest_hostvars'] | dict2items }}"
+      delegate_to: kvm_remote_execution_host
+      vars:
+        ansible_become_password: "{{ hostvars['localhost']['kvm_ubuntu_become_password'] }}"
+      when: "'ubuntu_hosts_file' in ansible_run_tags"
       tags:
-        - hosts_file
+        - ubuntu_hosts_file
+
+    - name: Remove deleted KVM guest entries from Mac hosts file
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
+        state: absent
+      loop: "{{ hostvars['localhost']['kvm_selected_guest_hostvars'] | dict2items }}"
+
+    - name: Report hosts file cleanup
+      ansible.builtin.debug:
+        msg: >-
+          Removed /etc/hosts entries for
+          {{ hostvars['localhost']['kvm_selected_guest_hostvars'].keys() | list | join(', ') }}
+          from Ubuntu and Mac.
