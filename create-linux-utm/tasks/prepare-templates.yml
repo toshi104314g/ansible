@@ -1,0 +1,46 @@
+---
+- name: Build distinct clone template list
+  ansible.builtin.set_fact:
+    utm_template_names: "{{ utm_clone_vms | map(attribute='template_name') | unique | list }}"
+
+- name: List registered UTM virtual machines
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - list
+  register: utm_vm_list
+  changed_when: false
+
+- name: Parse registered UTM VM names
+  ansible.builtin.set_fact:
+    utm_vm_names: >-
+      {{
+        utm_vm_list.stdout_lines
+        | map('regex_replace', '^\S+\s+\S+\s+', '')
+        | reject('equalto', 'Name')
+        | list
+      }}
+
+- name: Require all clone templates to be registered
+  ansible.builtin.assert:
+    that:
+      - item in utm_vm_names
+    fail_msg: "UTM template '{{ item }}' was not found; create it and rerun."
+  loop: "{{ utm_template_names }}"
+
+- name: Check clone template status
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - status
+      - "{{ item }}"
+  register: utm_template_status
+  changed_when: false
+  loop: "{{ utm_template_names }}"
+
+- name: Require clone templates to be stopped
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim == 'stopped'
+    fail_msg: "UTM template '{{ item.item }}' must be stopped before cloning."
+  loop: "{{ utm_template_status.results }}"

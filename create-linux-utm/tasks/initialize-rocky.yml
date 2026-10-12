@@ -1,0 +1,115 @@
+---
+- name: Check Rocky clone identity markers
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "root@{{ utm_vm_ipv6[item.name] }}"
+      - /usr/bin/test
+      - -f
+      - /var/lib/ansible-utm-clone-initialized
+  register: utm_rocky_identity_markers
+  changed_when: false
+  failed_when: utm_rocky_identity_markers.rc not in [0, 1]
+  loop: "{{ utm_clone_vms | selectattr('os', 'equalto', 'rocky9') | list }}"
+
+- name: Read uninitialized Rocky clone hostnames
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "root@{{ utm_vm_ipv6[item.item.name] }}"
+      - /usr/bin/hostname
+  register: utm_rocky_current_hostnames
+  changed_when: false
+  loop: "{{ utm_rocky_identity_markers.results }}"
+  when: item.rc != 0
+
+- name: Refuse to initialize non-template Rocky guests
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim in ['localhost.localdomain', item.item.item.hostname]
+    fail_msg: >-
+      UTM VM '{{ item.item.item.name }}' has unexpected hostname
+      '{{ item.stdout | trim }}'; refusing to initialize it.
+  loop: "{{ utm_rocky_current_hostnames.results | selectattr('skipped', 'undefined') | list }}"
+
+- name: Initialize fresh Rocky clone identities
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "root@{{ utm_vm_ipv6[item.item.name] }}"
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      hostnamectl set-hostname {{ item.item.hostname | quote }}
+      truncate -s 0 /etc/machine-id
+      systemd-machine-id-setup
+      rm -f /etc/ssh/ssh_host_*
+      ssh-keygen -A
+      systemctl restart sshd
+      touch /var/lib/ansible-utm-clone-initialized
+  loop: "{{ utm_rocky_identity_markers.results }}"
+  when: item.rc != 0
+
+- name: Remove old Rocky clone host keys from known_hosts
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -R
+      - "{{ utm_vm_ipv6[item.item.name] }}"
+      - -f
+      - "{{ utm_ssh_known_hosts_file }}"
+  loop: "{{ utm_rocky_identity_markers.results }}"
+  when: item.rc != 0
+  changed_when: true
+
+- name: Verify Rocky clone hostnames
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "root@{{ utm_vm_ipv6[item.name] }}"
+      - /usr/bin/hostname
+  register: utm_rocky_verified_hostname
+  changed_when: false
+  until: utm_rocky_verified_hostname.stdout | trim == item.hostname
+  retries: "{{ utm_poll_retries }}"
+  delay: "{{ utm_poll_delay }}"
+  loop: "{{ utm_clone_vms | selectattr('os', 'equalto', 'rocky9') | list }}"

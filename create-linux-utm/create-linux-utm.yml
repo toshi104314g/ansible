@@ -1,0 +1,16 @@
+---
+- name: Create or configure Linux UTM VMs
+  ansible.builtin.import_playbook: tasks/create-vms.yml
+  tags:
+    - create
+
+- name: Configure existing Linux UTM VMs
+  ansible.builtin.import_playbook: tasks/configure-existing-vms.yml
+  tags:
+    - create
+
+- name: Delete Linux UTM VMs from the selected inventory
+  ansible.builtin.import_playbook: tasks/delete-vms.yml
+  tags:
+    - delete
+    - never

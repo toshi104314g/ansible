@@ -1,0 +1,132 @@
+---
+- name: Check existing UTM guest status
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - status
+      - "{{ item.name }}"
+  register: utm_existing_status
+  changed_when: false
+  loop: "{{ utm_existing_vms }}"
+
+- name: Start stopped existing UTM guests
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - start
+      - "{{ item.item.name }}"
+  loop: "{{ utm_existing_status.results }}"
+  when: item.stdout | trim != 'started'
+
+- name: Wait for existing UTM guests to start
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - status
+      - "{{ item.name }}"
+  register: utm_existing_running_status
+  changed_when: false
+  until: utm_existing_running_status.stdout | trim == 'started'
+  retries: "{{ utm_poll_retries }}"
+  delay: "{{ utm_poll_delay }}"
+  loop: "{{ utm_existing_vms }}"
+
+- name: Read existing guest hostname through its SSH alias
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - "{{ item.ssh_user }}@{{ item.ssh_alias }}"
+      - /usr/bin/hostname
+  register: utm_existing_alias_hostname
+  changed_when: false
+  loop: "{{ utm_existing_vms }}"
+
+- name: Ensure SSH aliases point to the intended guests
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim in [item.item.expected_hostname, item.item.hostname]
+    fail_msg: >-
+      SSH alias '{{ item.item.ssh_alias }}' returned hostname
+      '{{ item.stdout | trim }}'; refusing to configure guest
+      '{{ item.item.hostname }}'.
+  loop: "{{ utm_existing_alias_hostname.results }}"
+
+- name: Install and enable QEMU guest agent on Rocky guests
+  ansible.builtin.import_tasks: install-rocky-agent.yml
+  when: utm_existing_vms | selectattr('os', 'equalto', 'rocky9') | list | length > 0
+
+- name: Install and enable QEMU guest agent on Ubuntu guests
+  ansible.builtin.import_tasks: install-ubuntu-agent.yml
+  when: utm_existing_vms | selectattr('os', 'equalto', 'ubuntu26') | list | length > 0
+
+- name: Wait for existing guests to report global IPv6
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - ip-address
+      - "{{ item.name }}"
+  register: utm_existing_ip_results
+  changed_when: false
+  failed_when: "'guest agent is not running or not installed' in (utm_existing_ip_results.stderr | lower)"
+  until: >-
+    utm_existing_ip_results.stdout
+    | regex_search('(?m)^' ~ item.global_ipv6_prefix ~ '[0-9A-Fa-f:]+$')
+    is not none
+  retries: "{{ utm_poll_retries }}"
+  delay: "{{ utm_poll_delay }}"
+  loop: "{{ utm_existing_vms }}"
+
+- name: Record existing guest IPv6 addresses
+  ansible.builtin.set_fact:
+    utm_existing_ipv6: >-
+      {{
+        (utm_existing_ipv6 | default({}))
+        | combine({
+            item.item.name:
+              (item.stdout | regex_findall(
+                '(?m)^' ~ item.item.global_ipv6_prefix ~ '[0-9A-Fa-f:]+$'
+              ) | first)
+          })
+      }}
+  loop: "{{ utm_existing_ip_results.results }}"
+
+- name: Verify existing guests are reachable over IPv6
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "{{ item.ssh_user }}@{{ utm_existing_ipv6[item.name] }}"
+      - /usr/bin/hostname
+  register: utm_existing_current_hostname
+  changed_when: false
+  loop: "{{ utm_existing_vms }}"
+
+- name: Ensure existing guests match their inventory identities
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim in [item.item.name, item.item.expected_hostname, item.item.hostname]
+    fail_msg: >-
+      UTM VM '{{ item.item.name }}' has hostname '{{ item.stdout | trim }}';
+      refusing to configure inventory guest '{{ item.item.hostname }}'.
+  loop: "{{ utm_existing_current_hostname.results }}"
+
+- name: Use existing guests as the network configuration target list
+  ansible.builtin.set_fact:
+    utm_clone_vms: "{{ utm_existing_vms }}"
+    utm_vm_ipv6: "{{ utm_existing_ipv6 }}"

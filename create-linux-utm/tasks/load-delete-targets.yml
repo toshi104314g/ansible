@@ -1,0 +1,50 @@
+---
+- name: Refuse deletion targets that are clone templates
+  ansible.builtin.assert:
+    that:
+      - item.utm_name not in (utm_delete_targets | map(attribute='template_name') | list)
+    fail_msg: "Refusing to delete template VM '{{ item.utm_name }}'."
+  loop: "{{ utm_delete_targets }}"
+
+- name: List registered UTM VMs before deletion
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - list
+  register: utm_delete_vm_list
+  changed_when: false
+
+- name: Parse registered UTM VM names
+  ansible.builtin.set_fact:
+    utm_delete_vm_names: >-
+      {{
+        utm_delete_vm_list.stdout_lines
+        | map('regex_replace', '^\S+\s+\S+\s+', '')
+        | reject('equalto', 'Name')
+        | list
+      }}
+
+- name: Record registered inventory VMs
+  ansible.builtin.set_fact:
+    utm_registered_delete_targets: >-
+      {{
+        utm_delete_targets
+        | selectattr('utm_name', 'in', utm_delete_vm_names)
+        | list
+      }}
+
+- name: Show inventory VMs already absent from UTM
+  ansible.builtin.debug:
+    msg: >-
+      These inventory VMs are already absent from UTM:
+      {{
+        utm_delete_targets
+        | rejectattr('utm_name', 'in', utm_delete_vm_names)
+        | map(attribute='utm_name')
+        | join(', ')
+      }}
+  when: >-
+    utm_delete_targets
+    | rejectattr('utm_name', 'in', utm_delete_vm_names)
+    | list
+    | length > 0

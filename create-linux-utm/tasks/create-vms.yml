@@ -1,0 +1,56 @@
+---
+- name: Provision Linux UTM VMs from the selected inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  vars_files:
+    - ../vars.yml
+
+  tasks:
+    - name: Load and validate the Linux UTM inventory
+      ansible.builtin.import_tasks: load-provisioning-config.yml
+      when: "'hosts_file' not in ansible_run_tags"
+      tags:
+        - always
+        - utm_inventory
+
+    - name: Load inventory for hosts-file-only runs
+      ansible.builtin.import_tasks: load-provisioning-config.yml
+      when: "'hosts_file' in ansible_run_tags"
+      tags:
+        - hosts_file
+
+    - name: Verify all templates are registered and stopped
+      ansible.builtin.import_tasks: prepare-templates.yml
+      when: utm_clone_vms | length > 0
+
+    - name: Clone and start configured virtual machines
+      ansible.builtin.import_tasks: clone-vms.yml
+      when: utm_clone_vms | length > 0
+
+    - name: Discover clone IPv6 addresses and verify SSH
+      ansible.builtin.import_tasks: discover-clones.yml
+      when: utm_clone_vms | length > 0
+
+    - name: Initialize Rocky Linux clone identities
+      ansible.builtin.import_tasks: initialize-rocky.yml
+      when: utm_clone_vms | selectattr('os', 'equalto', 'rocky9') | list | length > 0
+
+    - name: Initialize Ubuntu clone identities
+      ansible.builtin.import_tasks: initialize-ubuntu.yml
+      when: utm_clone_vms | selectattr('os', 'equalto', 'ubuntu26') | list | length > 0
+
+    - name: Configure Rocky Linux clone networking
+      ansible.builtin.import_tasks: configure-rocky-network.yml
+      when: utm_clone_vms | selectattr('os', 'equalto', 'rocky9') | list | length > 0
+
+    - name: Configure Ubuntu clone networking
+      ansible.builtin.import_tasks: configure-ubuntu-network.yml
+      when: utm_clone_vms | selectattr('os', 'equalto', 'ubuntu26') | list | length > 0
+
+    - name: Update the Mac hosts file from the selected inventory
+      ansible.builtin.import_tasks: update-hosts.yml
+      tags:
+        - hosts_file

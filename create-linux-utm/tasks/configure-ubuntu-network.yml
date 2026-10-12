@@ -1,0 +1,100 @@
+---
+- name: Configure static IPv4 and IPv6 SLAAC on Ubuntu clones
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "toshiyuki@{{ utm_vm_ipv6[item.name] }}"
+      - sudo
+      - -n
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      interface={{ item.network_connection | quote }}
+      mac_address=$(cat "/sys/class/net/$interface/address")
+      netplan_file=/etc/netplan/99-ansible-utm.yaml
+      temp_file=$(mktemp)
+      trap 'rm -f "$temp_file"' EXIT
+      cat > "$temp_file" <<NETPLAN
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+          {{ item.network_connection | to_json }}:
+            match:
+              macaddress: {{ '${mac_address}' }}
+            set-name: {{ item.network_connection | to_json }}
+            dhcp4: false
+            dhcp6: false
+            accept-ra: true
+            addresses:
+              - {{ (item.ipv4_address ~ '/' ~ item.ipv4_prefix_length) | to_json }}
+            routes:
+              - to: default
+                via: {{ item.ipv4_gateway | to_json }}
+            nameservers:
+              addresses: {{ item.ipv4_dns_servers | to_json }}
+      NETPLAN
+      if ! cmp -s "$temp_file" "$netplan_file"; then
+        install -m 600 "$temp_file" "$netplan_file"
+        netplan generate
+        netplan apply
+        echo changed
+      fi
+  register: utm_ubuntu_network_updates
+  changed_when: "'changed' in utm_ubuntu_network_updates.stdout"
+  loop: "{{ utm_clone_vms | selectattr('os', 'equalto', 'ubuntu26') | list }}"
+
+- name: Verify static IPv4 and SLAAC on Ubuntu clones
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "toshiyuki@{{ utm_vm_ipv6[item.name] }}"
+      - sudo
+      - -n
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      grep -Eq '^[[:space:]]+dhcp4: false$' /etc/netplan/99-ansible-utm.yaml
+      grep -Eq '^[[:space:]]+accept-ra: true$' /etc/netplan/99-ansible-utm.yaml
+      ip -4 -o address show dev {{ item.network_connection | quote }} |
+        awk '{print $4}' |
+        grep -Fxq {{ (item.ipv4_address ~ '/' ~ item.ipv4_prefix_length) | quote }}
+      ip -6 address show dev {{ item.network_connection | quote }} scope global |
+        grep -q 'inet6'
+  register: utm_ubuntu_network_verification
+  changed_when: false
+  until: utm_ubuntu_network_verification.rc == 0
+  retries: "{{ utm_poll_retries }}"
+  delay: "{{ utm_poll_delay }}"
+  loop: "{{ utm_clone_vms | selectattr('os', 'equalto', 'ubuntu26') | list }}"
+
+- name: Report configured Ubuntu clones
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.hostname }} configured with static IPv4
+      {{ item.ipv4_address }}/{{ item.ipv4_prefix_length }} and IPv6 SLAAC.
+  loop: "{{ utm_clone_vms | selectattr('os', 'equalto', 'ubuntu26') | list }}"

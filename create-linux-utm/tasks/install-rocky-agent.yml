@@ -1,0 +1,32 @@
+---
+- name: Install and enable QEMU guest agent on Rocky guests
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - "root@{{ item.ssh_alias }}"
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      changed=0
+      if ! rpm -q qemu-guest-agent >/dev/null 2>&1; then
+        dnf install -y qemu-guest-agent
+        changed=1
+      fi
+      if ! systemctl is-enabled --quiet qemu-guest-agent ||
+         ! systemctl is-active --quiet qemu-guest-agent; then
+        systemctl enable --now qemu-guest-agent
+        changed=1
+      fi
+      if [ "$changed" -eq 1 ]; then
+        echo qemu-guest-agent-configured
+      fi
+  register: utm_existing_agent_install
+  changed_when: "'qemu-guest-agent-configured' in utm_existing_agent_install.stdout"
+  loop: "{{ utm_existing_vms | selectattr('os', 'equalto', 'rocky9') | list }}"

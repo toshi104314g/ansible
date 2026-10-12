@@ -1,0 +1,48 @@
+---
+- name: Configure existing Linux UTM guests from the selected inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  vars_files:
+    - ../vars.yml
+  vars:
+    utm_require_ssh_alias: true
+
+  tasks:
+    - name: Load and validate the Linux UTM inventory
+      ansible.builtin.import_tasks: load-provisioning-config.yml
+      when: "'hosts_file' not in ansible_run_tags"
+      tags:
+        - always
+        - utm_inventory
+
+    - name: Load inventory for hosts-file-only runs
+      ansible.builtin.import_tasks: load-provisioning-config.yml
+      when: "'hosts_file' in ansible_run_tags"
+      tags:
+        - hosts_file
+
+    - name: Start and validate existing guest access
+      ansible.builtin.import_tasks: prepare-existing.yml
+      when: utm_existing_vms | length > 0
+
+    - name: Configure existing Rocky Linux networking
+      ansible.builtin.import_tasks: configure-rocky-network.yml
+      vars:
+        utm_clone_vms: "{{ utm_existing_vms }}"
+        utm_vm_ipv6: "{{ utm_existing_ipv6 }}"
+      when: utm_existing_vms | selectattr('os', 'equalto', 'rocky9') | list | length > 0
+
+    - name: Configure existing Ubuntu networking
+      ansible.builtin.import_tasks: configure-ubuntu-network.yml
+      vars:
+        utm_clone_vms: "{{ utm_existing_vms }}"
+        utm_vm_ipv6: "{{ utm_existing_ipv6 }}"
+      when: utm_existing_vms | selectattr('os', 'equalto', 'ubuntu26') | list | length > 0
+
+    - name: Update Mac hosts entries for inventory virtual machines
+      ansible.builtin.import_tasks: update-hosts.yml
+      tags:
+        - hosts_file

@@ -1,0 +1,21 @@
+---
+- name: Remove inventory host entries from the Mac hosts file
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
+    state: absent
+  become: true
+  loop: "{{ utm_inventory_hostvars | dict2items }}"
+
+- name: Remove obsolete UTM hosts block markers
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^# (BEGIN|END) ANSIBLE UTM (SAMBA AD HOSTS|MANAGED HOSTS)$'
+    state: absent
+  become: true
+
+- name: Report inventory host entries removed
+  ansible.builtin.debug:
+    msg: >-
+      Removed /etc/hosts entries for
+      {{ utm_inventory_hostvars.keys() | list | join(', ') }}.

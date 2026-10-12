@@ -1,0 +1,36 @@
+---
+- name: Install and enable QEMU guest agent on Ubuntu guests
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - "{{ item.ssh_user }}@{{ item.ssh_alias }}"
+      - sudo
+      - -n
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      changed=0
+      if ! dpkg-query -W -f='${Status}' qemu-guest-agent 2>/dev/null |
+           grep -q 'install ok installed'; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-guest-agent
+        changed=1
+      fi
+      if ! systemctl is-enabled --quiet qemu-guest-agent ||
+         ! systemctl is-active --quiet qemu-guest-agent; then
+        systemctl enable --now qemu-guest-agent
+        changed=1
+      fi
+      if [ "$changed" -eq 1 ]; then
+        echo qemu-guest-agent-configured
+      fi
+  register: utm_existing_agent_install
+  changed_when: "'qemu-guest-agent-configured' in utm_existing_agent_install.stdout"
+  loop: "{{ utm_existing_vms | selectattr('os', 'equalto', 'ubuntu26') | list }}"

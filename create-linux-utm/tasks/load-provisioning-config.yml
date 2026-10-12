@@ -1,0 +1,143 @@
+---
+- name: Require exactly one inventory source selected with -i
+  ansible.builtin.assert:
+    that:
+      - ansible_inventory_sources is defined
+      - ansible_inventory_sources | length == 1
+    fail_msg: "Specify exactly one inventory file with -i. No default inventory is used."
+
+- name: Record the inventory file selected with -i
+  ansible.builtin.set_fact:
+    inventory_path: "{{ ansible_inventory_sources | first }}"
+
+- name: Check that the selected inventory is a regular file
+  ansible.builtin.stat:
+    path: "{{ inventory_path }}"
+  register: utm_inventory_file
+
+- name: Require a valid inventory file
+  ansible.builtin.assert:
+    that:
+      - utm_inventory_file.stat.exists
+      - utm_inventory_file.stat.isreg
+    fail_msg: "The selected inventory '{{ inventory_path }}' is not a regular file."
+
+- name: Parse the selected inventory
+  ansible.builtin.command:
+    argv:
+      - ansible-inventory
+      - --inventory
+      - "{{ inventory_path }}"
+      - --list
+  register: utm_inventory_result
+  changed_when: false
+
+- name: Record inventory host variables
+  ansible.builtin.set_fact:
+    utm_inventory_hostvars: "{{ (utm_inventory_result.stdout | from_json)['_meta']['hostvars'] }}"
+
+- name: Require at least one inventory host
+  ansible.builtin.assert:
+    that:
+      - utm_inventory_hostvars | length > 0
+    fail_msg: "The provisioning inventory has no hosts."
+
+- name: Validate required Linux host variables
+  ansible.builtin.assert:
+    that:
+      - item.value.utm_vm_name is defined
+      - item.value.utm_template_name is defined
+      - item.value.utm_os is defined
+      - item.value.utm_os in ['rocky9', 'ubuntu26']
+      - item.value.utm_provision is defined
+      - item.value.utm_provision in ['clone', 'existing']
+      - item.value.ansible_host is defined
+      - item.value.ansible_host is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+      - item.value.ansible_host.split('.') | map('int') | select('gt', 255) | list | length == 0
+      - item.value.utm_network_connection is defined
+      - item.value.utm_global_ipv6_prefix is defined
+      - item.value.utm_ipv4_prefix_length is defined
+      - item.value.utm_ipv4_gateway is defined
+      - item.value.utm_ipv4_dns_servers is defined
+      - item.value.utm_ipv4_prefix_length | int >= 1
+      - item.value.utm_ipv4_prefix_length | int <= 32
+      - item.value.utm_ipv4_dns_servers | length > 0
+      - >-
+        item.value.utm_os != 'ubuntu26' or
+        (item.value.ansible_user | default('toshiyuki')) == 'toshiyuki'
+      - >-
+        utm_require_ssh_alias | default(true) == false or
+        item.value.utm_provision != 'existing' or
+        item.value.utm_ssh_alias is defined
+    fail_msg: >-
+      Host '{{ item.key }}' must define utm_os (rocky9 or ubuntu26),
+      utm_template_name, utm_vm_name, utm_provision, ansible_host,
+      utm_network_connection, utm_global_ipv6_prefix, and IPv4 network settings.
+      Existing hosts also require utm_ssh_alias. Ubuntu uses the toshiyuki SSH user.
+  loop: "{{ utm_inventory_hostvars | dict2items }}"
+
+- name: Require unique guest names, UTM names, and IPv4 addresses
+  ansible.builtin.assert:
+    that:
+      - (utm_inventory_hostvars.keys() | list | unique | length) == (utm_inventory_hostvars | length)
+      - (utm_inventory_hostvars.values() | map(attribute='utm_vm_name') | list | unique | length) == (utm_inventory_hostvars | length)
+      - (utm_inventory_hostvars.values() | map(attribute='ansible_host') | list | unique | length) == (utm_inventory_hostvars | length)
+    fail_msg: "Inventory hostnames, UTM VM names, and IPv4 addresses must be unique."
+
+- name: Require a consistent IPv6 prefix
+  ansible.builtin.assert:
+    that:
+      - (utm_inventory_hostvars.values() | map(attribute='utm_global_ipv6_prefix') | unique | length) == 1
+    fail_msg: "All hosts must use the same utm_global_ipv6_prefix."
+
+- name: Initialize clone, existing, and delete target lists
+  ansible.builtin.set_fact:
+    utm_clone_vms: []
+    utm_existing_vms: []
+    utm_delete_targets: []
+
+- name: Build guest target lists from inventory
+  ansible.builtin.set_fact:
+    utm_clone_vms: >-
+      {{
+        utm_clone_vms + ([{
+          'hostname': item.key,
+          'name': item.value.utm_vm_name,
+          'template_name': item.value.utm_template_name,
+          'os': item.value.utm_os,
+          'ssh_user': 'root' if item.value.utm_os == 'rocky9' else 'toshiyuki',
+          'ipv4_address': item.value.ansible_host,
+          'network_connection': item.value.utm_network_connection,
+          'global_ipv6_prefix': item.value.utm_global_ipv6_prefix,
+          'ipv4_prefix_length': item.value.utm_ipv4_prefix_length,
+          'ipv4_gateway': item.value.utm_ipv4_gateway,
+          'ipv4_dns_servers': item.value.utm_ipv4_dns_servers
+        }] if item.value.utm_provision == 'clone' else [])
+      }}
+    utm_existing_vms: >-
+      {{
+        utm_existing_vms + ([{
+          'hostname': item.key,
+          'name': item.value.utm_vm_name,
+          'template_name': item.value.utm_template_name,
+          'os': item.value.utm_os,
+          'ssh_user': 'root' if item.value.utm_os == 'rocky9' else 'toshiyuki',
+          'ssh_alias': item.value.utm_ssh_alias | default(''),
+          'expected_hostname': item.value.utm_expected_hostname | default(item.key),
+          'ipv4_address': item.value.ansible_host,
+          'network_connection': item.value.utm_network_connection,
+          'global_ipv6_prefix': item.value.utm_global_ipv6_prefix,
+          'ipv4_prefix_length': item.value.utm_ipv4_prefix_length,
+          'ipv4_gateway': item.value.utm_ipv4_gateway,
+          'ipv4_dns_servers': item.value.utm_ipv4_dns_servers
+        }] if item.value.utm_provision == 'existing' else [])
+      }}
+    utm_delete_targets: >-
+      {{
+        utm_delete_targets + [{
+          'inventory_hostname': item.key,
+          'utm_name': item.value.utm_vm_name,
+          'template_name': item.value.utm_template_name
+        }]
+      }}
+  loop: "{{ utm_inventory_hostvars | dict2items }}"

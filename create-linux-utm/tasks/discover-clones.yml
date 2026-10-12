@@ -1,0 +1,66 @@
+---
+- name: Wait for cloned VMs to report an IPv6 address
+  ansible.builtin.command:
+    argv:
+      - "{{ utmctl_command }}"
+      - ip-address
+      - "{{ item.name }}"
+  register: utm_clone_ip_results
+  changed_when: false
+  until: >-
+    utm_clone_ip_results.stdout
+    | regex_search('(?m)^' ~ item.global_ipv6_prefix ~ '[0-9A-Fa-f:]+$')
+    is not none
+  retries: "{{ utm_poll_retries }}"
+  delay: "{{ utm_poll_delay }}"
+  loop: "{{ utm_clone_vms }}"
+
+- name: Record cloned VM IPv6 addresses
+  ansible.builtin.set_fact:
+    utm_vm_ipv6: >-
+      {{
+        (utm_vm_ipv6 | default({}))
+        | combine({
+            item.item.name:
+              (item.stdout | regex_findall(
+                '(?m)^' ~ item.item.global_ipv6_prefix ~ '[0-9A-Fa-f:]+$'
+              ) | first)
+          })
+      }}
+  loop: "{{ utm_clone_ip_results.results }}"
+
+- name: Verify the management SSH key exists
+  ansible.builtin.stat:
+    path: "{{ utm_ssh_private_key_file }}"
+  register: utm_ssh_private_key
+
+- name: Require the management SSH key
+  ansible.builtin.assert:
+    that:
+      - utm_ssh_private_key.stat.exists
+      - utm_ssh_private_key.stat.isreg
+    fail_msg: "SSH private key not found: {{ utm_ssh_private_key_file }}"
+
+- name: Wait for SSH access to cloned VMs
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "{{ item.ssh_user }}@{{ utm_vm_ipv6[item.name] }}"
+      - /usr/bin/true
+  register: utm_ssh_check
+  changed_when: false
+  until: utm_ssh_check.rc == 0
+  retries: "{{ utm_poll_retries }}"
+  delay: "{{ utm_poll_delay }}"
+  loop: "{{ utm_clone_vms }}"
