@@ -217,3 +217,21 @@
           - item.rc != 0
         fail_msg: "KVM clone volume '{{ item.item.name }}.qcow2' remains after deletion."
       loop: "{{ kvm_delete_volume_verification.results }}"
+
+    - name: Remove deleted KVM guest entries from the Ubuntu hosts file
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
+        state: absent
+      loop: "{{ kvm_inventory_hostvars | dict2items }}"
+      become: true
+      tags:
+        - hosts_file
+
+    - name: Report deleted KVM guest hosts entries
+      ansible.builtin.debug:
+        msg: >-
+          Removed /etc/hosts entries for
+          {{ kvm_inventory_hostvars.keys() | list | join(', ') }}.
+      tags:
+        - hosts_file

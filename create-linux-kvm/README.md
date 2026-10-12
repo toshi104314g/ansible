@@ -52,7 +52,12 @@ Ensure the KVM controller has `~/.ssh/id_ed25519` and its matching `~/.ssh/id_ed
 Run from the repository root on the KVM host, selecting exactly one inventory:
 
 ```sh
-# Create/configure the mixed-OS example VMs; skip hosts-file changes
+# Create/configure the mixed-OS example VMs and update the Ubuntu hosts file
+ansible-playbook \
+  -i inventory/inventory_linux_kvm.example.yml \
+  create-linux-kvm/create-linux-kvm.yml
+
+# Optional: create/configure guests without changing the Ubuntu hosts file
 ansible-playbook \
   -i inventory/inventory_linux_kvm.example.yml \
   create-linux-kvm/create-linux-kvm.yml \
@@ -65,11 +70,13 @@ ansible-playbook \
   --tags hosts_file \
   -K
 
-# Delete VMs selected by the inventory (requires typing DELETE)
+# Delete VMs selected by the inventory and remove their /etc/hosts entries
+# (requires sudo and typing DELETE)
 ansible-playbook \
   -i inventory/inventory_linux_kvm.example.yml \
   create-linux-kvm/create-linux-kvm.yml \
-  --tags delete
+  --tags delete \
+  -K
 ```
 
-Deletion stops and undefines only domains listed in the selected inventory and removes their attached storage. It does not remove template image volumes or the libvirt network. Review the inventory carefully before confirming deletion.
+Deletion stops and undefines only domains listed in the selected inventory, removes their attached storage, and removes their entries from the Ubuntu KVM controller's `/etc/hosts`. It does not remove template image volumes or the libvirt network. Review the inventory carefully before confirming deletion. If the controller user has passwordless sudo, `-K` is not required.

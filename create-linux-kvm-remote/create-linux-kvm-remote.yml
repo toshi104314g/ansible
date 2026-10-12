@@ -215,7 +215,7 @@
                   hostvars['localhost']['kvm_wrapper_action']
                 ]
                 + (
-                    ['--skip-tags', 'create']
+                    ['--skip-tags', 'create,hosts_file']
                     if hostvars['localhost']['kvm_wrapper_action'] == 'delete'
                     else ['--skip-tags', 'hosts_file']
                   )
