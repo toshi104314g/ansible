@@ -1,0 +1,39 @@
+---
+- name: Require each template image to exist in the selected storage pool
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - vol-info
+      - --pool
+      - "{{ kvm_storage_pool }}"
+      - "{{ item.template_image }}"
+  register: kvm_template_volume_info
+  changed_when: false
+  loop: "{{ kvm_clone_vms }}"
+
+- name: Check that clone domains do not already own an unrelated disk volume
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - vol-info
+      - --pool
+      - "{{ kvm_storage_pool }}"
+      - "{{ item.name }}.qcow2"
+  register: kvm_clone_volume_info
+  changed_when: false
+  failed_when: kvm_clone_volume_info.rc not in [0, 1]
+  loop: "{{ kvm_clone_vms }}"
+  when: item.name not in kvm_domain_names
+
+- name: Refuse to overwrite pre-existing clone volumes
+  ansible.builtin.assert:
+    that:
+      - item.rc != 0
+    fail_msg: >-
+      Clone disk '{{ item.item.name }}.qcow2' already exists without a matching
+      KVM domain. Inspect it manually before continuing.
+  loop: "{{ kvm_clone_volume_info.results | selectattr('skipped', 'undefined') | list }}"

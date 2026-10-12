@@ -28,8 +28,11 @@ ansible.log
 !/inventory/inventory_samba-ad.yml
 !/inventory/inventory_ubuntu26.yml
 !/inventory/inventory_linux_utm.example.yml
+!/inventory/inventory_linux_kvm.example.yml
+!/inventory/inventory_linux_kvm_br0.example.yml
 !/create-ubuntu26-utm/tasks/delete-inventory-vms.yml
 !/create-linux-utm/tasks/delete-inventory-vms.yml
+!/create-linux-kvm/tasks/delete-inventory-vms.yml
 
 # Personal cloud-init configuration
 create-debian/files/user-data

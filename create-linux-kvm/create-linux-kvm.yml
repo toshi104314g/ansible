@@ -1,0 +1,11 @@
+---
+- name: Create or configure Linux KVM virtual machines
+  ansible.builtin.import_playbook: tasks/create-vms.yml
+  tags:
+    - create
+
+- name: Delete Linux KVM virtual machines
+  ansible.builtin.import_playbook: tasks/delete-vms.yml
+  tags:
+    - delete
+    - never

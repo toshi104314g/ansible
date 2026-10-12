@@ -1,0 +1,188 @@
+---
+- name: Check existing KVM domain status
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - domstate
+      - "{{ item.name }}"
+  register: kvm_existing_states
+  changed_when: false
+  loop: "{{ kvm_existing_vms }}"
+
+- name: Start shut off existing KVM guests
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - start
+      - "{{ item.item.name }}"
+  loop: "{{ kvm_existing_states.results }}"
+  when: item.stdout | trim != 'running'
+
+- name: Wait for existing guest SSH access
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
+      - /usr/bin/true
+  register: kvm_existing_ssh_check
+  changed_when: false
+  until: kvm_existing_ssh_check.rc == 0
+  retries: "{{ kvm_poll_retries }}"
+  delay: "{{ kvm_poll_delay }}"
+  loop: "{{ kvm_existing_vms }}"
+
+- name: Configure static IPv4 on existing Rocky guests
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "root@{{ item.ipv4_address }}"
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      interface=$(ip -4 route show default | awk 'NR == 1 { for (i=1; i<=NF; i++) if ($i == "dev") { print $(i+1); exit } }')
+      connection=$(nmcli -g GENERAL.CONNECTION device show "$interface")
+      address={{ (item.ipv4_address ~ '/' ~ item.prefix_length) | quote }}
+      gateway={{ item.gateway | quote }}
+      dns={{ (item.dns_servers | join(',')) | quote }}
+      nmcli connection modify "$connection" \
+        ipv4.method manual \
+        ipv4.addresses "$address" \
+        ipv4.gateway "$gateway" \
+        ipv4.dns "$dns" \
+        ipv4.ignore-auto-dns yes
+      nmcli device reapply "$interface"
+  loop: "{{ kvm_existing_vms | selectattr('os', 'equalto', 'rocky9') | list }}"
+
+- name: Configure static IPv4 on existing Ubuntu guests
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "toshiyuki@{{ item.ipv4_address }}"
+      - sudo
+      - -n
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      interface=$(ip -4 route show default | awk 'NR == 1 { for (i=1; i<=NF; i++) if ($i == "dev") { print $(i+1); exit } }')
+      mac_address=$(cat "/sys/class/net/$interface/address")
+      file=/etc/netplan/99-ansible-kvm.yaml
+      temp_file=$(mktemp)
+      trap 'rm -f "$temp_file"' EXIT
+      cat > "$temp_file" <<NETPLAN
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+          kvm:
+            match:
+              macaddress: $mac_address
+            dhcp4: false
+            dhcp6: false
+            accept-ra: true
+            addresses:
+              - {{ (item.ipv4_address ~ '/' ~ item.prefix_length) | to_json }}
+            routes:
+              - to: default
+                via: {{ item.gateway | to_json }}
+            nameservers:
+              addresses: {{ item.dns_servers | to_json }}
+      NETPLAN
+      if ! cmp -s "$temp_file" "$file"; then
+        install -m 600 "$temp_file" "$file"
+        netplan generate
+        netplan apply
+      fi
+  loop: "{{ kvm_existing_vms | selectattr('os', 'equalto', 'ubuntu26') | list }}"
+
+- name: Verify existing KVM guest hostnames and IPv4 addresses
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
+      - /usr/bin/hostname
+  register: kvm_existing_hostname
+  changed_when: false
+  loop: "{{ kvm_existing_vms }}"
+
+- name: Require existing guest hostnames to match inventory
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim == item.item.hostname
+    fail_msg: >-
+      KVM guest '{{ item.item.name }}' has hostname '{{ item.stdout | trim }}',
+      expected '{{ item.item.hostname }}'.
+  loop: "{{ kvm_existing_hostname.results }}"
+
+- name: Install the optional additional SSH public key on existing guests
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
+      - "{{ 'sudo -n bash -s' if item.os == 'ubuntu26' else 'bash -s' }}"
+    stdin: |
+      set -eu
+      home=$(getent passwd {{ item.ssh_user | quote }} | cut -d: -f6)
+      install -d -m 700 "$home/.ssh"
+      touch "$home/.ssh/authorized_keys"
+      key={{ kvm_additional_ssh_public_key | quote }}
+      grep -Fxq "$key" "$home/.ssh/authorized_keys" || printf '%s\n' "$key" >> "$home/.ssh/authorized_keys"
+      chmod 600 "$home/.ssh/authorized_keys"
+  loop: "{{ kvm_existing_vms }}"
+  when: kvm_additional_ssh_public_key_file | length > 0
+  no_log: true

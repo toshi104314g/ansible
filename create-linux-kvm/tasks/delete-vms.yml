@@ -1,0 +1,216 @@
+---
+- name: Delete KVM VMs listed in the selected inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  vars_files:
+    - ../vars.yml
+  vars:
+    kvm_require_ssh_keys: false
+
+  tasks:
+    - name: Confirm deletion of inventory KVM virtual machines
+      ansible.builtin.pause:
+        prompt: >-
+          This permanently deletes the KVM VMs listed in the selected inventory.
+          Type DELETE to continue
+      register: kvm_delete_confirmation
+      tags:
+        - delete
+        - never
+
+    - name: Require explicit deletion confirmation
+      ansible.builtin.assert:
+        that:
+          - kvm_delete_confirmation.user_input == 'DELETE'
+        fail_msg: "Deletion cancelled. The required confirmation is DELETE."
+      tags:
+        - delete
+        - never
+
+    - name: Load and validate the KVM inventory for deletion
+      ansible.builtin.import_tasks: load-provisioning-config.yml
+      tags:
+        - always
+        - kvm_inventory
+
+    - name: List KVM domains before deletion
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - list
+          - --all
+          - --name
+      register: kvm_delete_domain_list
+      changed_when: false
+
+    - name: Select registered inventory KVM domains
+      ansible.builtin.set_fact:
+        kvm_registered_delete_targets: >-
+          {{
+            kvm_delete_targets
+            | selectattr('name', 'in',
+                (kvm_delete_domain_list.stdout_lines | reject('equalto', '') | list))
+            | list
+          }}
+
+    - name: Check inventory KVM domain states
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - domstate
+          - "{{ item.name }}"
+      register: kvm_delete_states
+      changed_when: false
+      loop: "{{ kvm_registered_delete_targets }}"
+
+    - name: Stop running inventory KVM domains
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - shutdown
+          - "{{ item.item.name }}"
+      loop: "{{ kvm_delete_states.results }}"
+      when: item.stdout | trim == 'running'
+
+    - name: Wait for inventory KVM domains to shut down
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - domstate
+          - "{{ item.name }}"
+      register: kvm_delete_stopped
+      changed_when: false
+      failed_when: >-
+        kvm_delete_stopped.rc != 0
+        and 'failed to get domain' not in (kvm_delete_stopped.stderr | lower)
+      until: >-
+        kvm_delete_stopped.stdout | trim == 'shut off'
+        or (
+          kvm_delete_stopped.rc != 0
+          and 'failed to get domain' in (kvm_delete_stopped.stderr | lower)
+        )
+      retries: "{{ kvm_poll_retries }}"
+      delay: "{{ kvm_poll_delay }}"
+      loop: "{{ kvm_registered_delete_targets }}"
+
+    - name: Refresh registered KVM domains before undefining
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - list
+          - --all
+          - --name
+      register: kvm_delete_domains_before_undefine
+      changed_when: false
+
+    - name: Undefine remaining inventory KVM domains and remove attached storage
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - undefine
+          - "{{ item.name }}"
+          - --remove-all-storage
+      loop: >-
+        {{
+          kvm_registered_delete_targets
+          | selectattr('name', 'in',
+              (kvm_delete_domains_before_undefine.stdout_lines | reject('equalto', '') | list))
+          | list
+        }}
+
+    - name: Validate clone volumes cannot refer to template images
+      ansible.builtin.assert:
+        that:
+          - item.name ~ '.qcow2' != item.template_image
+        fail_msg: >-
+          Refusing to delete the clone volume for '{{ item.name }}' because its
+          name matches template image '{{ item.template_image }}'.
+      loop: "{{ kvm_delete_targets }}"
+
+    - name: Check for remaining inventory clone volumes
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - vol-info
+          - --pool
+          - "{{ kvm_storage_pool }}"
+          - "{{ item.name }}.qcow2"
+      register: kvm_delete_clone_volume_info
+      changed_when: false
+      failed_when: >-
+        kvm_delete_clone_volume_info.rc != 0
+        and 'no storage vol with matching path' not in (kvm_delete_clone_volume_info.stderr | lower)
+      loop: "{{ kvm_delete_targets }}"
+
+    - name: Remove remaining inventory clone volumes
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - vol-delete
+          - --pool
+          - "{{ kvm_storage_pool }}"
+          - "{{ item.item.name }}.qcow2"
+      loop: "{{ kvm_delete_clone_volume_info.results }}"
+      when: item.rc == 0
+
+    - name: Confirm inventory KVM domains are absent
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - list
+          - --all
+          - --name
+      register: kvm_delete_verification
+      changed_when: false
+
+    - name: Require deleted inventory KVM domains to be absent
+      ansible.builtin.assert:
+        that:
+          - item.name not in (kvm_delete_verification.stdout_lines | reject('equalto', '') | list)
+        fail_msg: "KVM domain '{{ item.name }}' is still registered after deletion."
+      loop: "{{ kvm_delete_targets }}"
+
+    - name: Confirm inventory clone volumes are absent
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - vol-info
+          - --pool
+          - "{{ kvm_storage_pool }}"
+          - "{{ item.name }}.qcow2"
+      register: kvm_delete_volume_verification
+      changed_when: false
+      failed_when: >-
+        kvm_delete_volume_verification.rc != 0
+        and 'no storage vol with matching path' not in (kvm_delete_volume_verification.stderr | lower)
+      loop: "{{ kvm_delete_targets }}"
+
+    - name: Require inventory clone volumes to be absent
+      ansible.builtin.assert:
+        that:
+          - item.rc != 0
+        fail_msg: "KVM clone volume '{{ item.item.name }}.qcow2' remains after deletion."
+      loop: "{{ kvm_delete_volume_verification.results }}"

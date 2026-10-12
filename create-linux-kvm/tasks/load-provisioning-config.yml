@@ -1,0 +1,219 @@
+---
+- name: Require exactly one inventory source selected with -i
+  ansible.builtin.assert:
+    that:
+      - ansible_inventory_sources is defined
+      - ansible_inventory_sources | length == 1
+    fail_msg: "Specify exactly one inventory file with -i. No default inventory is used."
+
+- name: Record the selected inventory path
+  ansible.builtin.set_fact:
+    kvm_inventory_path: "{{ ansible_inventory_sources | first }}"
+
+- name: Check that the selected inventory is a regular file
+  ansible.builtin.stat:
+    path: "{{ kvm_inventory_path }}"
+  register: kvm_inventory_file
+
+- name: Require a valid inventory file
+  ansible.builtin.assert:
+    that:
+      - kvm_inventory_file.stat.exists
+      - kvm_inventory_file.stat.isreg
+    fail_msg: "Selected KVM inventory '{{ kvm_inventory_path }}' is not a regular file."
+
+- name: Parse selected inventory
+  ansible.builtin.command:
+    argv:
+      - ansible-inventory
+      - --inventory
+      - "{{ kvm_inventory_path }}"
+      - --list
+  register: kvm_inventory_result
+  changed_when: false
+
+- name: Record inventory host variables
+  ansible.builtin.set_fact:
+    kvm_inventory_hostvars: "{{ (kvm_inventory_result.stdout | from_json)['_meta']['hostvars'] }}"
+
+- name: Require at least one inventory host
+  ansible.builtin.assert:
+    that:
+      - kvm_inventory_hostvars | length > 0
+    fail_msg: "The KVM inventory has no hosts."
+
+- name: Validate required KVM host variables
+  ansible.builtin.assert:
+    that:
+      - item.value.kvm_os is defined
+      - item.value.kvm_os in ['rocky9', 'ubuntu26']
+      - item.value.kvm_template_image is defined
+      - item.value.kvm_template_image | length > 0
+      - item.value.kvm_vm_name is defined
+      - item.value.kvm_vm_name is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - item.value.kvm_vm_name != (item.value.kvm_template_image | basename)
+      - item.value.kvm_provision is defined
+      - item.value.kvm_provision in ['clone', 'existing']
+      - item.value.ansible_host is defined
+      - item.value.ansible_host is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+      - item.value.ansible_host.split('.') | map('int') | select('gt', 255) | list | length == 0
+      - (item.value.kvm_network_name is defined) != (item.value.kvm_bridge_name is defined)
+      - item.value.kvm_network_name is not defined or item.value.kvm_network_name | length > 0
+      - item.value.kvm_bridge_name is not defined or item.value.kvm_bridge_name is match('^[A-Za-z0-9_.-]+$')
+      - item.value.kvm_storage_pool is defined
+      - item.value.kvm_ipv4_prefix_length is defined
+      - item.value.kvm_ipv4_prefix_length | int >= 1
+      - item.value.kvm_ipv4_prefix_length | int <= 32
+      - item.value.kvm_ipv4_gateway is defined
+      - item.value.kvm_ipv4_dns_servers is defined
+      - item.value.kvm_ipv4_dns_servers | length > 0
+      - item.value.kvm_os != 'ubuntu26' or (item.value.ansible_user | default('toshiyuki')) == 'toshiyuki'
+    fail_msg: >-
+      Host '{{ item.key }}' must specify kvm_os (rocky9 or ubuntu26),
+      kvm_template_image, kvm_vm_name, kvm_provision, ansible_host,
+      exactly one of kvm_network_name or kvm_bridge_name, kvm_storage_pool,
+      and IPv4 network settings.
+      Ubuntu hosts use the toshiyuki SSH user.
+  loop: "{{ kvm_inventory_hostvars | dict2items }}"
+
+- name: Require unique VM names and IPv4 addresses
+  ansible.builtin.assert:
+    that:
+      - (kvm_inventory_hostvars.values() | map(attribute='kvm_vm_name') | list | unique | length) == (kvm_inventory_hostvars | length)
+      - (kvm_inventory_hostvars.values() | map(attribute='ansible_host') | list | unique | length) == (kvm_inventory_hostvars | length)
+    fail_msg: "Inventory KVM VM names and IPv4 addresses must be unique."
+
+- name: Require consistent storage and network settings
+  ansible.builtin.assert:
+    that:
+      - (kvm_inventory_hostvars.values() | map(attribute='kvm_storage_pool') | unique | length) == 1
+      - (kvm_inventory_hostvars.values() | selectattr('kvm_network_name', 'defined') | list | length) in [0, kvm_inventory_hostvars | length]
+      - (kvm_inventory_hostvars.values() | selectattr('kvm_bridge_name', 'defined') | list | length) in [0, kvm_inventory_hostvars | length]
+      - (kvm_inventory_hostvars.values() | selectattr('kvm_network_name', 'defined') | map(attribute='kvm_network_name') | unique | length) <= 1
+      - (kvm_inventory_hostvars.values() | selectattr('kvm_bridge_name', 'defined') | map(attribute='kvm_bridge_name') | unique | length) <= 1
+      - (kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_prefix_length') | unique | length) == 1
+      - (kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_gateway') | unique | length) == 1
+      - (kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_dns_servers') | unique | length) == 1
+    fail_msg: >-
+      Hosts in one KVM inventory must use the same storage pool, network mode
+      and name, IPv4 prefix length, gateway, and DNS servers.
+
+- name: Require SSH keys for cloud-init access
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: kvm_ssh_key_stats
+  loop:
+    - "{{ kvm_ssh_private_key_file }}"
+    - "{{ kvm_ssh_public_key_file }}"
+
+- name: Validate SSH key files
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+    fail_msg: "Required SSH key file not found: {{ item.item }}"
+  loop: "{{ kvm_ssh_key_stats.results }}"
+
+- name: Record the public key for cloud-init
+  ansible.builtin.set_fact:
+    kvm_ssh_public_key: "{{ lookup('ansible.builtin.file', kvm_ssh_public_key_file) | trim }}"
+  no_log: true
+
+- name: Check the optional additional guest SSH public key
+  ansible.builtin.stat:
+    path: "{{ kvm_additional_ssh_public_key_file }}"
+  register: kvm_additional_ssh_public_key_stat
+  when: kvm_additional_ssh_public_key_file | length > 0
+
+- name: Require the optional additional guest SSH public key
+  ansible.builtin.assert:
+    that:
+      - kvm_additional_ssh_public_key_stat.stat.exists
+      - kvm_additional_ssh_public_key_stat.stat.isreg
+    fail_msg: "Additional guest SSH public key not found: {{ kvm_additional_ssh_public_key_file }}"
+  when: kvm_additional_ssh_public_key_file | length > 0
+
+- name: Record the optional additional guest SSH public key
+  ansible.builtin.set_fact:
+    kvm_additional_ssh_public_key: >-
+      {{ lookup('ansible.builtin.file', kvm_additional_ssh_public_key_file) | trim }}
+  no_log: true
+  when: kvm_additional_ssh_public_key_file | length > 0
+
+- name: Build the authorized SSH key list for guests
+  ansible.builtin.set_fact:
+    kvm_guest_ssh_public_keys: >-
+      {{
+        [kvm_ssh_public_key]
+        + ([kvm_additional_ssh_public_key] if kvm_additional_ssh_public_key_file | length > 0 else [])
+      }}
+  no_log: true
+
+- name: Initialize clone, existing, and delete target lists
+  ansible.builtin.set_fact:
+    kvm_clone_vms: []
+    kvm_existing_vms: []
+    kvm_delete_targets: []
+
+- name: Build guest target lists from inventory
+  ansible.builtin.set_fact:
+    kvm_clone_vms: >-
+      {{
+        kvm_clone_vms + ([{
+          'inventory_hostname': item.key,
+          'hostname': item.key,
+          'name': item.value.kvm_vm_name,
+          'os': item.value.kvm_os,
+          'ssh_user': 'root' if item.value.kvm_os == 'rocky9' else 'toshiyuki',
+          'template_image': item.value.kvm_template_image | basename,
+          'ipv4_address': item.value.ansible_host,
+          'network_name': item.value.kvm_network_name | default(''),
+          'bridge_name': item.value.kvm_bridge_name | default(''),
+          'storage_pool': item.value.kvm_storage_pool,
+          'prefix_length': item.value.kvm_ipv4_prefix_length,
+          'gateway': item.value.kvm_ipv4_gateway,
+          'dns_servers': item.value.kvm_ipv4_dns_servers,
+          'memory_mb': item.value.kvm_memory_mb | default(kvm_default_memory_mb),
+          'vcpus': item.value.kvm_vcpus | default(kvm_default_vcpus)
+        }] if item.value.kvm_provision == 'clone' else [])
+      }}
+    kvm_existing_vms: >-
+      {{
+        kvm_existing_vms + ([{
+          'inventory_hostname': item.key,
+          'hostname': item.key,
+          'name': item.value.kvm_vm_name,
+          'os': item.value.kvm_os,
+          'ssh_user': 'root' if item.value.kvm_os == 'rocky9' else 'toshiyuki',
+          'ipv4_address': item.value.ansible_host,
+          'network_name': item.value.kvm_network_name | default(''),
+          'bridge_name': item.value.kvm_bridge_name | default(''),
+          'prefix_length': item.value.kvm_ipv4_prefix_length,
+          'gateway': item.value.kvm_ipv4_gateway,
+          'dns_servers': item.value.kvm_ipv4_dns_servers
+        }] if item.value.kvm_provision == 'existing' else [])
+      }}
+    kvm_delete_targets: >-
+      {{
+        kvm_delete_targets + [{
+          'inventory_hostname': item.key,
+          'name': item.value.kvm_vm_name,
+          'template_image': item.value.kvm_template_image | basename,
+          'provision': item.value.kvm_provision
+        }]
+      }}
+  loop: "{{ kvm_inventory_hostvars | dict2items }}"
+
+- name: Record common storage and network settings
+  ansible.builtin.set_fact:
+    kvm_storage_pool: "{{ kvm_inventory_hostvars.values() | map(attribute='kvm_storage_pool') | first }}"
+    kvm_network_mode: "{{ 'bridge' if kvm_inventory_hostvars.values() | selectattr('kvm_bridge_name', 'defined') | list | length else 'network' }}"
+    kvm_network_name: >-
+      {{
+        (kvm_inventory_hostvars.values() | map(attribute='kvm_bridge_name') | first)
+        if kvm_inventory_hostvars.values() | selectattr('kvm_bridge_name', 'defined') | list | length
+        else (kvm_inventory_hostvars.values() | map(attribute='kvm_network_name') | first)
+      }}
+    kvm_ipv4_prefix_length: "{{ kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_prefix_length') | first }}"
+    kvm_ipv4_gateway: "{{ kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_gateway') | first }}"
+    kvm_ipv4_dns_servers: "{{ kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_dns_servers') | first }}"

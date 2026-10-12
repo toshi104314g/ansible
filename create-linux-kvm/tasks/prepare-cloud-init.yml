@@ -1,0 +1,89 @@
+---
+- name: Create private cloud-init working directory
+  ansible.builtin.file:
+    path: "{{ lookup('env', 'HOME') }}/.cache/ansible-linux-kvm"
+    state: directory
+    mode: "0700"
+
+- name: Create the dedicated SSH known-hosts file if needed
+  ansible.builtin.file:
+    path: "{{ kvm_ssh_known_hosts_file }}"
+    state: touch
+    mode: "0600"
+    access_time: preserve
+    modification_time: preserve
+
+- name: Write cloud-init user data for each cloned guest
+  ansible.builtin.copy:
+    dest: "{{ lookup('env', 'HOME') }}/.cache/ansible-linux-kvm/{{ item.name }}-user-data"
+    mode: "0600"
+    content: |
+      #cloud-config
+      hostname: {{ item.hostname }}
+      fqdn: {{ item.hostname }}
+      manage_etc_hosts: true
+      ssh_pwauth: false
+      disable_root: {{ 'false' if item.os == 'rocky9' else 'true' }}
+      users:
+      {% if item.os != 'rocky9' %}
+        - default
+      {% endif %}
+      {% if item.os == 'rocky9' %}
+        - name: root
+          lock_passwd: true
+          shell: /bin/bash
+          ssh_authorized_keys:
+      {% for public_key in kvm_guest_ssh_public_keys %}
+            - {{ public_key | to_json }}
+      {% endfor %}
+      {% else %}
+        - name: toshiyuki
+          gecos: Toshiyuki
+          groups: [adm, sudo]
+          shell: /bin/bash
+          lock_passwd: true
+          sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+          ssh_authorized_keys:
+      {% for public_key in kvm_guest_ssh_public_keys %}
+            - {{ public_key | to_json }}
+      {% endfor %}
+      {% endif %}
+      packages:
+        - qemu-guest-agent
+        - openssh-server
+      runcmd:
+        - [systemctl, start, qemu-guest-agent]
+        - [ssh-keygen, -A]
+        - [systemctl, enable, --now, {{ 'sshd' if item.os == 'rocky9' else 'ssh' }}]
+  loop: "{{ kvm_clone_vms }}"
+  no_log: true
+
+- name: Write unique cloud-init metadata for each cloned guest
+  ansible.builtin.copy:
+    dest: "{{ lookup('env', 'HOME') }}/.cache/ansible-linux-kvm/{{ item.name }}-meta-data"
+    mode: "0600"
+    content: |
+      instance-id: {{ item.name }}
+      local-hostname: {{ item.hostname }}
+  loop: "{{ kvm_clone_vms }}"
+
+- name: Write static IPv4 cloud-init network configuration
+  ansible.builtin.copy:
+    dest: "{{ lookup('env', 'HOME') }}/.cache/ansible-linux-kvm/{{ item.name }}-network-config"
+    mode: "0600"
+    content: |
+      version: 2
+      ethernets:
+        {{ 'eth0' if item.os == 'rocky9' else 'ens3' }}:
+          renderer: {{ 'NetworkManager' if item.os == 'rocky9' else 'networkd' }}
+          dhcp4: false
+          dhcp6: true
+          accept-ra: true
+          addresses:
+            - {{ item.ipv4_address }}/{{ item.prefix_length }}
+          routes:
+            - to: 0.0.0.0/0
+              via: {{ item.gateway }}
+          nameservers:
+            addresses: {{ item.dns_servers | to_json }}
+  loop: "{{ kvm_clone_vms }}"

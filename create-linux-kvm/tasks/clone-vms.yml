@@ -1,0 +1,91 @@
+---
+- name: Remove stale KVM SSH host keys before creating new guests
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -R
+      - "{{ item.ipv4_address }}"
+      - -f
+      - "{{ kvm_ssh_known_hosts_file }}"
+  loop: "{{ kvm_clone_vms }}"
+  when: item.name not in kvm_domain_names
+  changed_when: true
+
+- name: Clone each template volume to its guest disk
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - vol-clone
+      - "{{ item.template_image }}"
+      - "{{ item.name }}.qcow2"
+      - --pool
+      - "{{ kvm_storage_pool }}"
+  loop: "{{ kvm_clone_vms }}"
+  when: item.name not in kvm_domain_names
+
+- name: Create KVM domains from cloned images
+  ansible.builtin.command:
+    argv:
+      - virt-install
+      - --connect
+      - "{{ kvm_connection }}"
+      - --name
+      - "{{ item.name }}"
+      - --memory
+      - "{{ item.memory_mb | string }}"
+      - --vcpus
+      - "{{ item.vcpus | string }}"
+      - --os-variant
+      - generic
+      - --import
+      - --disk
+      - "vol={{ item.storage_pool }}/{{ item.name }}.qcow2,bus=virtio"
+      - --network
+      - "{{ ('bridge=' ~ item.bridge_name) if item.bridge_name else ('network=' ~ item.network_name) }},model=virtio"
+      - --channel
+      - "unix,target.type=virtio,name=org.qemu.guest_agent.0"
+      - --cloud-init
+      - "user-data={{ lookup('env', 'HOME') }}/.cache/ansible-linux-kvm/{{ item.name }}-user-data,meta-data={{ lookup('env', 'HOME') }}/.cache/ansible-linux-kvm/{{ item.name }}-meta-data,network-config={{ lookup('env', 'HOME') }}/.cache/ansible-linux-kvm/{{ item.name }}-network-config"
+      - --noautoconsole
+  loop: "{{ kvm_clone_vms }}"
+  when: item.name not in kvm_domain_names
+
+- name: Check cloned KVM domain states
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - domstate
+      - "{{ item.name }}"
+  register: kvm_guest_states
+  changed_when: false
+  loop: "{{ kvm_clone_vms }}"
+
+- name: Start shut off cloned KVM guests
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - start
+      - "{{ item.item.name }}"
+  loop: "{{ kvm_guest_states.results }}"
+  when: item.stdout | trim != 'running'
+
+- name: Wait for cloned KVM guests to run
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - domstate
+      - "{{ item.name }}"
+  register: kvm_guest_running
+  changed_when: false
+  until: kvm_guest_running.stdout | trim == 'running'
+  retries: "{{ kvm_poll_retries }}"
+  delay: "{{ kvm_poll_delay }}"
+  loop: "{{ kvm_clone_vms }}"

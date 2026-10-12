@@ -1,0 +1,14 @@
+---
+- name: Update hosts entries on the Ubuntu KVM controller
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
+    line: "{{ item.value.ansible_host }} {{ item.key }}"
+  become: true
+  loop: "{{ kvm_inventory_hostvars | dict2items }}"
+
+- name: Report KVM hosts entries
+  ansible.builtin.debug:
+    msg: >-
+      Updated /etc/hosts entries for
+      {{ kvm_inventory_hostvars.keys() | list | join(', ') }}.

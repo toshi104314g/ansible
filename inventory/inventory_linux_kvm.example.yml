@@ -1,0 +1,25 @@
+---
+all:
+  children:
+    linux_kvm_guests:
+      vars:
+        kvm_provision: clone
+      hosts:
+        rocky-kvm1:
+          kvm_os: rocky9
+          kvm_template_image: Rocky-9-GenericCloud.latest.x86_64.qcow2
+          kvm_vm_name: rocky-kvm1
+          ansible_host: "192.168.250.20"
+        ubuntu-kvm1:
+          kvm_os: ubuntu26
+          kvm_template_image: ubuntu-26.04-cloudimg-amd64.img
+          kvm_vm_name: ubuntu-kvm1
+          ansible_host: "192.168.250.21"
+
+  vars:
+    kvm_network_name: ansible-kvm
+    kvm_storage_pool: default
+    kvm_ipv4_prefix_length: 24
+    kvm_ipv4_gateway: 192.168.250.1
+    kvm_ipv4_dns_servers:
+      - 192.168.250.1

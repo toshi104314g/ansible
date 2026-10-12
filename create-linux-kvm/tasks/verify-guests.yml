@@ -1,0 +1,165 @@
+---
+- name: Inspect cloned KVM guest network interfaces
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - domiflist
+      - "{{ item.name }}"
+  register: kvm_guest_interfaces
+  changed_when: false
+  loop: "{{ kvm_clone_vms }}"
+
+- name: Verify cloned KVM guests use the selected network attachment
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.stdout | regex_search(
+          '(?m)^\\s+\\S+\\s+' ~ ('bridge' if kvm_network_mode == 'bridge' else 'network')
+          ~ '\\s+' ~ kvm_network_name ~ '\\s+'
+        ) is not none
+    fail_msg: >-
+      KVM guest '{{ item.item.name }}' is not attached to the selected
+      {{ kvm_network_mode }} '{{ kvm_network_name }}'.
+  loop: "{{ kvm_guest_interfaces.results }}"
+
+- name: Wait for cloned KVM guests to accept SSH
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
+      - /usr/bin/true
+  register: kvm_ssh_check
+  changed_when: false
+  until: kvm_ssh_check.rc == 0
+  retries: "{{ kvm_poll_retries }}"
+  delay: "{{ kvm_poll_delay }}"
+  loop: "{{ kvm_clone_vms }}"
+
+- name: Wait for cloned guests to finish cloud-init
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
+      - cloud-init
+      - status
+      - --wait
+  register: kvm_cloud_init_status
+  changed_when: false
+  until: kvm_cloud_init_status.rc != 255
+  retries: "{{ kvm_poll_retries }}"
+  delay: "{{ kvm_poll_delay }}"
+  loop: "{{ kvm_clone_vms }}"
+
+- name: Ensure SELinux is disabled on Rocky guests
+  ansible.builtin.import_tasks: disable-rocky-selinux.yml
+
+- name: Wait for cloned guests to respond to the QEMU guest agent
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - qemu-agent-command
+      - "{{ item.name }}"
+      - '{"execute":"guest-get-host-name"}'
+  register: kvm_guest_agent_check
+  changed_when: false
+  until: kvm_guest_agent_check.rc == 0 and item.hostname in kvm_guest_agent_check.stdout
+  retries: "{{ kvm_poll_retries }}"
+  delay: "{{ kvm_poll_delay }}"
+  loop: "{{ kvm_clone_vms }}"
+
+- name: Verify cloned guest hostnames and static IPv4 addresses
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
+      - >-
+        {{ 'sudo -n bash -s' if item.os == 'ubuntu26' else 'bash -s' }}
+    stdin: |
+      set -e
+      test "$(hostname)" = {{ item.hostname | quote }}
+      ip -4 -o address show |
+        awk '{print $4}' |
+        grep -Fxq {{ (item.ipv4_address ~ '/' ~ item.prefix_length) | quote }}
+      ip -6 -o address show dev {{ ('eth0' if item.os == 'rocky9' else 'ens3') | quote }} scope global |
+        grep -q 'scope global dynamic'
+      ip -6 route show default | grep -q 'proto ra'
+      {% if item.os == 'rocky9' %}
+      test "$(getenforce)" = Disabled
+      grep -q '^SELINUX=disabled$' /etc/selinux/config
+      grep -Eq '(^|[[:space:]])selinux=0([[:space:]]|$)' /proc/cmdline
+      connection=$(nmcli -g GENERAL.CONNECTION device show eth0)
+      test "$(nmcli -g ipv4.method connection show "$connection")" = manual
+      test "$(nmcli -g ipv6.method connection show "$connection")" = auto
+      {% else %}
+      if command -v getenforce >/dev/null 2>&1; then
+        test "$(getenforce)" = Disabled
+      else
+        test ! -e /sys/fs/selinux/enforce
+      fi
+      grep -Eq '^[[:space:]]+dhcp4: false$' /etc/netplan/50-cloud-init.yaml
+      grep -Eq '^[[:space:]]+dhcp6: true$' /etc/netplan/50-cloud-init.yaml
+      {% endif %}
+  register: kvm_guest_verification
+  changed_when: false
+  loop: "{{ kvm_clone_vms }}"
+
+- name: Verify Ubuntu guests have passwordless sudo
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "toshiyuki@{{ item.ipv4_address }}"
+      - sudo
+      - -n
+      - "true"
+  become: false
+  loop: "{{ kvm_clone_vms | selectattr('os', 'equalto', 'ubuntu26') | list }}"
+  changed_when: false
+
+- name: Report provisioned KVM guests
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.name }} ({{ item.os }}) is reachable at {{ item.ipv4_address }}
+      as {{ item.ssh_user }}.
+  loop: "{{ kvm_clone_vms }}"

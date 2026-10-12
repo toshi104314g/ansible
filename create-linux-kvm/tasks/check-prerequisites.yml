@@ -1,0 +1,78 @@
+---
+- name: Check KVM management commands
+  ansible.builtin.command:
+    argv:
+      - "{{ item }}"
+      - --version
+  register: kvm_tool_versions
+  changed_when: false
+  loop:
+    - virsh
+    - virt-install
+    - qemu-img
+
+- name: Verify system libvirt is reachable
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - list
+      - --all
+      - --name
+  register: kvm_domain_list
+  changed_when: false
+
+- name: Verify the selected storage pool is active
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - pool-info
+      - "{{ kvm_storage_pool }}"
+  register: kvm_pool_info
+  changed_when: false
+  failed_when: kvm_pool_info.stdout | regex_search('(?m)^State:\\s+running$') is none
+
+- name: Verify the selected libvirt network is active
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - net-info
+      - "{{ kvm_network_name }}"
+  register: kvm_network_info
+  changed_when: false
+  failed_when: kvm_network_info.stdout | regex_search('(?m)^Active:\\s+yes$') is none
+  when: kvm_network_mode == 'network'
+
+- name: Verify the selected host interface is an active Linux bridge
+  ansible.builtin.command:
+    argv:
+      - ip
+      - -json
+      - -details
+      - link
+      - show
+      - dev
+      - "{{ kvm_network_name }}"
+  register: kvm_bridge_info
+  changed_when: false
+  failed_when: >-
+    (kvm_bridge_info.stdout | from_json | length != 1)
+    or (kvm_bridge_info.stdout | from_json | first).linkinfo.info_kind != 'bridge'
+    or 'UP' not in (kvm_bridge_info.stdout | from_json | first).flags
+  when: kvm_network_mode == 'bridge'
+
+- name: Record registered libvirt domain names
+  ansible.builtin.set_fact:
+    kvm_domain_names: "{{ kvm_domain_list.stdout_lines | reject('equalto', '') | list }}"
+
+- name: Refuse a VM name that collides with a template image name
+  ansible.builtin.assert:
+    that:
+      - item.name != item.template_image
+    fail_msg: "KVM domain '{{ item.name }}' must not use the template image name."
+  loop: "{{ kvm_clone_vms }}"

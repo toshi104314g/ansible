@@ -1,0 +1,144 @@
+---
+- name: Initialize the Rocky guest boot ID map
+  ansible.builtin.set_fact:
+    kvm_rocky_boot_ids: {}
+
+- name: Record Rocky guest boot IDs before SELinux configuration
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "root@{{ item.ipv4_address }}"
+      - cat
+      - /proc/sys/kernel/random/boot_id
+  register: kvm_rocky_boot_id_results
+  changed_when: false
+  loop: "{{ kvm_clone_vms | selectattr('os', 'equalto', 'rocky9') | list }}"
+
+- name: Save Rocky guest boot IDs
+  ansible.builtin.set_fact:
+    kvm_rocky_boot_ids: "{{ kvm_rocky_boot_ids | combine({item.item.name: item.stdout | trim}) }}"
+  loop: "{{ kvm_rocky_boot_id_results.results }}"
+
+- name: Configure SELinux disabled on Rocky guests
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "root@{{ item.ipv4_address }}"
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      changed=0
+      if ! grubby --info=ALL | grep -Eq '(^|[[:space:]])selinux=0([[:space:]]|$)'; then
+        grubby --update-kernel=ALL --args=selinux=0
+        changed=1
+      fi
+      if ! grep -q '^SELINUX=disabled$' /etc/selinux/config; then
+        sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config
+        changed=1
+      fi
+      if [ "$(getenforce)" = Enforcing ]; then
+        setenforce 0
+      fi
+      if [ "$changed" -eq 1 ]; then
+        echo reboot-required
+      fi
+  register: kvm_rocky_selinux_updates
+  changed_when: "'reboot-required' in kvm_rocky_selinux_updates.stdout"
+  loop: "{{ kvm_clone_vms | selectattr('os', 'equalto', 'rocky9') | list }}"
+
+- name: Reboot Rocky guests to apply the SELinux kernel setting
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "root@{{ item.item.ipv4_address }}"
+      - "nohup sh -c 'sleep 2; systemctl reboot' >/dev/null 2>&1 </dev/null &"
+  loop: "{{ kvm_rocky_selinux_updates.results }}"
+  when: "'reboot-required' in item.stdout"
+  changed_when: true
+
+- name: Allow Rocky guests time to reboot
+  ansible.builtin.pause:
+    seconds: 5
+  when: kvm_rocky_selinux_updates.results | selectattr('stdout', 'search', 'reboot-required') | list | length > 0
+
+- name: Check Rocky domain states after the SELinux reboot request
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - domstate
+      - "{{ item.item.name }}"
+  register: kvm_rocky_domain_states_after_reboot
+  changed_when: false
+  loop: "{{ kvm_rocky_selinux_updates.results }}"
+  when: "'reboot-required' in item.stdout"
+
+- name: Start Rocky guests that shut down during the SELinux reboot
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - start
+      - "{{ item.item.item.name }}"
+  loop: "{{ kvm_rocky_domain_states_after_reboot.results | default([]) }}"
+  when:
+    - not item.skipped | default(false)
+    - item.stdout | trim == 'shut off'
+
+- name: Wait for Rocky guests to boot with the SELinux setting
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "root@{{ item.item.ipv4_address }}"
+      - cat
+      - /proc/sys/kernel/random/boot_id
+  register: kvm_rocky_boot_id_after
+  changed_when: false
+  until: kvm_rocky_boot_id_after.rc == 0 and (kvm_rocky_boot_id_after.stdout | trim) != kvm_rocky_boot_ids[item.item.name]
+  retries: "{{ kvm_poll_retries }}"
+  delay: "{{ kvm_poll_delay }}"
+  loop: "{{ kvm_rocky_selinux_updates.results }}"
+  when: "'reboot-required' in item.stdout"

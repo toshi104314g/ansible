@@ -1,0 +1,199 @@
+---
+- name: Prepare the selected KVM inventory on the Mac
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  vars:
+    kvm_controller_ssh_alias: ubuntu
+    kvm_mac_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519"
+    kvm_mac_ssh_public_key_file: "{{ kvm_mac_ssh_private_key_file }}.pub"
+
+  tasks:
+    - name: Require exactly one inventory source selected with -i
+      ansible.builtin.assert:
+        that:
+          - ansible_inventory_sources is defined
+          - ansible_inventory_sources | length == 1
+        fail_msg: "Specify exactly one VM inventory file with -i."
+
+    - name: Record the selected VM inventory path
+      ansible.builtin.command:
+        argv:
+          - realpath
+          - "{{ ansible_inventory_sources | first }}"
+      register: kvm_selected_inventory_realpath
+      changed_when: false
+
+    - name: Parse the selected VM inventory on the Mac
+      ansible.builtin.command:
+        argv:
+          - ansible-inventory
+          - --inventory
+          - "{{ kvm_selected_inventory_realpath.stdout }}"
+          - --list
+      register: kvm_selected_inventory_result
+      changed_when: false
+
+    - name: Record selected KVM guest hosts
+      ansible.builtin.set_fact:
+        kvm_selected_guest_hostvars: >-
+          {{ (kvm_selected_inventory_result.stdout | from_json)['_meta']['hostvars'] }}
+
+    - name: Require at least one KVM guest
+      ansible.builtin.assert:
+        that:
+          - kvm_selected_guest_hostvars | length > 0
+        fail_msg: "The selected KVM inventory has no guests."
+
+    - name: Require valid VM hostnames and IPv4 addresses
+      ansible.builtin.assert:
+        that:
+          - item.key is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+          - item.value.ansible_host is defined
+          - item.value.ansible_host is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+          - item.value.ansible_host.split('.') | map('int') | select('gt', 255) | list | length == 0
+        fail_msg: >-
+          Each selected inventory host must have a valid ansible_host IPv4 address;
+          inventory hostname '{{ item.key }}' is invalid.
+      loop: "{{ kvm_selected_guest_hostvars | dict2items }}"
+
+    - name: Check the Mac SSH key pair
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: kvm_mac_ssh_key_stats
+      loop:
+        - "{{ kvm_mac_ssh_private_key_file }}"
+        - "{{ kvm_mac_ssh_public_key_file }}"
+
+    - name: Require the Mac SSH private and public key files
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+        fail_msg: "Required Mac SSH key file not found: {{ item.item }}"
+      loop: "{{ kvm_mac_ssh_key_stats.results }}"
+
+    - name: Derive the public key from the Mac private key
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -y
+          - -f
+          - "{{ kvm_mac_ssh_private_key_file }}"
+      register: kvm_mac_derived_public_key
+      changed_when: false
+      no_log: true
+
+    - name: Verify the Mac public key matches its private key
+      ansible.builtin.assert:
+        that:
+          - >-
+            kvm_mac_derived_public_key.stdout.split()[:2]
+            == lookup('ansible.builtin.file', kvm_mac_ssh_public_key_file).split()[:2]
+        fail_msg: "The Mac SSH public key does not match the configured private key."
+      no_log: true
+
+    - name: Record the Mac public-key file path for remote staging
+      ansible.builtin.set_fact:
+        kvm_mac_ssh_public_key_file: "{{ kvm_mac_ssh_public_key_file }}"
+
+    - name: Register the Ubuntu KVM host for SSH delegation
+      ansible.builtin.add_host:
+        name: kvm_remote_execution_host
+        groups: kvm_remote_execution_hosts
+        ansible_host: "{{ kvm_controller_ssh_alias }}"
+        ansible_connection: ssh
+
+- name: Run KVM provisioning on the Ubuntu host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    kvm_controller_ssh_alias: ubuntu
+
+  tasks:
+    - name: Create a private temporary workspace on Ubuntu
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: ansible-linux-kvm-
+      register: kvm_remote_workspace
+      delegate_to: kvm_remote_execution_host
+
+    - name: Stage inventory, playbook, and Mac public key on Ubuntu
+      block:
+        - name: Copy the selected VM inventory to Ubuntu
+          ansible.builtin.copy:
+            src: "{{ hostvars['localhost']['kvm_selected_inventory_realpath'].stdout }}"
+            dest: "{{ kvm_remote_workspace.path }}/inventory.yml"
+            mode: "0600"
+          delegate_to: kvm_remote_execution_host
+
+        - name: Copy the KVM playbook to Ubuntu
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../create-linux-kvm/"
+            dest: "{{ kvm_remote_workspace.path }}/create-linux-kvm/"
+            directory_mode: "0755"
+          delegate_to: kvm_remote_execution_host
+
+        - name: Copy the Mac public key to Ubuntu
+          ansible.builtin.copy:
+            src: "{{ hostvars['localhost']['kvm_mac_ssh_public_key_file'] }}"
+            dest: "{{ kvm_remote_workspace.path }}/mac-id_ed25519.pub"
+            mode: "0600"
+          delegate_to: kvm_remote_execution_host
+
+        - name: Run the KVM playbook on Ubuntu using the Mac-selected inventory
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/ansible-playbook
+              - --inventory
+              - "{{ kvm_remote_workspace.path }}/inventory.yml"
+              - "{{ kvm_remote_workspace.path }}/create-linux-kvm/create-linux-kvm.yml"
+              - --skip-tags
+              - hosts_file
+              - --extra-vars
+              - "{{ {'kvm_additional_ssh_public_key_file': kvm_remote_workspace.path ~ '/mac-id_ed25519.pub'} | to_json }}"
+          register: kvm_remote_playbook_result
+          changed_when: true
+          environment:
+            PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          delegate_to: kvm_remote_execution_host
+
+        - name: Report the Ubuntu KVM playbook result
+          ansible.builtin.debug:
+            var: kvm_remote_playbook_result.stdout_lines
+      always:
+        - name: Remove the temporary Ubuntu workspace
+          ansible.builtin.file:
+            path: "{{ kvm_remote_workspace.path }}"
+            state: absent
+          delegate_to: kvm_remote_execution_host
+
+- name: Add the deployed VMs to the Mac hosts file
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  tags:
+    - hosts_file
+
+  tasks:
+    - name: Update Mac hosts entries for selected KVM guests
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
+        line: "{{ item.value.ansible_host }} {{ item.key }}"
+      loop: "{{ hostvars['localhost']['kvm_selected_guest_hostvars'] | dict2items }}"
+      tags:
+        - hosts_file
+
+    - name: Report Mac hosts file updates
+      ansible.builtin.debug:
+        msg: >-
+          Added or updated /etc/hosts entries for
+          {{ hostvars['localhost']['kvm_selected_guest_hostvars'].keys() | list | join(', ') }}.
+      tags:
+        - hosts_file
