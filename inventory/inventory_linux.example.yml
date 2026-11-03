@@ -1,0 +1,48 @@
+---
+all:
+  children:
+    linux_utm_guests:
+      vars:
+        utm_provision: clone
+        utm_network_connection: enp0s1
+        utm_global_ipv6_prefix: "2409:"
+        utm_ipv4_prefix_length: 24
+        utm_ipv4_gateway: 192.168.10.1
+        utm_ipv4_dns_servers:
+          - 192.168.10.1
+        ansible_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519"
+        ansible_ssh_common_args: >-
+          -o StrictHostKeyChecking=accept-new
+          -o UserKnownHostsFile={{ lookup('env', 'HOME') }}/.ssh/known_hosts.ansible-utm
+      hosts:
+        rocky9-utm:
+          utm_os: rocky9
+          utm_template_name: rocky9-template
+          utm_vm_name: rocky9-utm
+          ansible_host: "192.168.10.40"
+        ubuntu26-utm:
+          utm_os: ubuntu26
+          utm_template_name: ubuntu26-template
+          utm_vm_name: ubuntu26-utm
+          ansible_host: "192.168.10.41"
+
+    linux_kvm_guests:
+      vars:
+        kvm_provision: clone
+        kvm_bridge_name: br0
+        kvm_storage_pool: default
+        kvm_ipv4_prefix_length: 24
+        kvm_ipv4_gateway: 192.168.10.1
+        kvm_ipv4_dns_servers:
+          - 192.168.10.1
+      hosts:
+        rocky9-kvm:
+          kvm_os: rocky9
+          kvm_template_image: Rocky-9-GenericCloud.latest.x86_64.qcow2
+          kvm_vm_name: rocky9-kvm
+          ansible_host: "192.168.10.42"
+        ubuntu26-kvm:
+          kvm_os: ubuntu26
+          kvm_template_image: ubuntu-26.04-cloudimg-amd64.img
+          kvm_vm_name: ubuntu26-kvm
+          ansible_host: "192.168.10.43"

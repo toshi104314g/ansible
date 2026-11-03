@@ -34,7 +34,13 @@
 
 - name: Record inventory host variables
   ansible.builtin.set_fact:
-    kvm_inventory_hostvars: "{{ (kvm_inventory_result.stdout | from_json)['_meta']['hostvars'] }}"
+    kvm_inventory_hostvars: >-
+      {{
+        (kvm_inventory_result.stdout | from_json)['_meta']['hostvars']
+        | dict2items
+        | selectattr('value.kvm_vm_name', 'defined')
+        | items2dict
+      }}
 
 - name: Require at least one inventory host
   ansible.builtin.assert:

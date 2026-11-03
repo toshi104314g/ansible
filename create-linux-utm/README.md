@@ -44,3 +44,5 @@ PATH="/opt/homebrew/bin:$PATH" ansible-playbook \
 Before cloning, each selected template must already exist in UTM and be stopped. The playbook does not start or modify templates. Templates must be prepared for their corresponding OS as described in the Rocky Linux and Ubuntu playbook READMEs. For Ubuntu templates, the `toshiyuki` account must have passwordless sudo, SSH key authentication, QEMU Guest Agent, and the Netplan DHCPv4/SLAAC baseline configured. For Rocky templates, root SSH and QEMU Guest Agent must be available.
 
 Deletion protects every `utm_template_name` specified by the inventory. The `remove_hosts_file` tag controls only removal of `/etc/hosts` entries and is independent of the VM deletion confirmation.
+
+For non-interactive deletion, explicitly confirm with `-e utm_delete_confirmation_input=DELETE`; otherwise the playbook prompts for `DELETE`.

@@ -41,7 +41,12 @@
     - name: Record selected KVM guest hosts
       ansible.builtin.set_fact:
         kvm_selected_guest_hostvars: >-
-          {{ (kvm_selected_inventory_result.stdout | from_json)['_meta']['hostvars'] }}
+          {{
+            (kvm_selected_inventory_result.stdout | from_json)['_meta']['hostvars']
+            | dict2items
+            | selectattr('value.kvm_vm_name', 'defined')
+            | items2dict
+          }}
 
     - name: Determine the requested KVM operation
       ansible.builtin.set_fact:

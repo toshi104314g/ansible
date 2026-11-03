@@ -1,0 +1,80 @@
+---
+- name: Validate the unified Linux inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags:
+    - always
+
+  tasks:
+    - name: Require exactly one inventory source
+      ansible.builtin.assert:
+        that:
+          - ansible_inventory_sources is defined
+          - ansible_inventory_sources | length == 1
+        fail_msg: "Specify exactly one unified Linux inventory with -i."
+
+    - name: Parse the unified Linux inventory
+      ansible.builtin.command:
+        argv:
+          - ansible-inventory
+          - --inventory
+          - "{{ ansible_inventory_sources | first }}"
+          - --list
+      register: unified_linux_inventory_result
+      changed_when: false
+
+    - name: Record UTM and KVM hosts from the unified inventory
+      ansible.builtin.set_fact:
+        unified_linux_inventory_hostvars: >-
+          {{ (unified_linux_inventory_result.stdout | from_json)['_meta']['hostvars'] }}
+        unified_linux_utm_hosts: >-
+          {{
+            (unified_linux_inventory_result.stdout | from_json)['_meta']['hostvars']
+            | dict2items
+            | selectattr('value.utm_vm_name', 'defined')
+            | items2dict
+          }}
+        unified_linux_kvm_hosts: >-
+          {{
+            (unified_linux_inventory_result.stdout | from_json)['_meta']['hostvars']
+            | dict2items
+            | selectattr('value.kvm_vm_name', 'defined')
+            | items2dict
+          }}
+
+    - name: Require UTM and KVM guests in the unified inventory
+      ansible.builtin.assert:
+        that:
+          - unified_linux_utm_hosts | length > 0
+          - unified_linux_kvm_hosts | length > 0
+        fail_msg: >-
+          The unified inventory must include at least one UTM guest
+          (utm_vm_name) and one KVM guest (kvm_vm_name).
+
+    - name: Require each inventory host to belong to exactly one backend
+      ansible.builtin.assert:
+        that:
+          - >-
+            (1 if item.value.utm_vm_name is defined else 0)
+            + (1 if item.value.kvm_vm_name is defined else 0) == 1
+          - item.value.ansible_host is defined
+        fail_msg: >-
+          Inventory host '{{ item.key }}' must define ansible_host and exactly
+          one of utm_vm_name or kvm_vm_name.
+      loop: "{{ unified_linux_inventory_hostvars | dict2items }}"
+
+    - name: Require unique IPv4 addresses across all UTM and KVM guests
+      ansible.builtin.assert:
+        that:
+          - >-
+            (unified_linux_inventory_hostvars.values()
+            | map(attribute='ansible_host') | list | unique | length)
+            == (unified_linux_inventory_hostvars | length)
+        fail_msg: "Every UTM and KVM guest must have a unique ansible_host IPv4 address."
+
+- name: Provision Linux guests on UTM
+  ansible.builtin.import_playbook: ../create-linux-utm/create-linux-utm.yml
+
+- name: Provision Linux guests on KVM
+  ansible.builtin.import_playbook: ../create-linux-kvm-remote/create-linux-kvm-remote.yml

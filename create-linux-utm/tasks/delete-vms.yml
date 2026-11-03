@@ -17,6 +17,7 @@
           This permanently deletes the UTM VMs listed in the provisioning
           inventory. Type DELETE to continue
       register: utm_delete_confirmation
+      when: utm_delete_confirmation_input | default('') != 'DELETE'
       tags:
         - delete
         - never
@@ -24,7 +25,9 @@
     - name: Require explicit confirmation before deleting virtual machines
       ansible.builtin.assert:
         that:
-          - utm_delete_confirmation.user_input == 'DELETE'
+          - >-
+            (utm_delete_confirmation_input | default('') == 'DELETE')
+            or (utm_delete_confirmation.user_input | default('') == 'DELETE')
         fail_msg: "Deletion cancelled. The required confirmation is DELETE."
       tags:
         - delete
