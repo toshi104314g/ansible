@@ -2,6 +2,7 @@
 *.retry
 .ansible/
 ansible.log
+/tmpbooks/
 
 # Credentials and local secrets
 .env
