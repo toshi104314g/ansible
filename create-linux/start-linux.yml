@@ -1,0 +1,250 @@
+---
+- name: Start stopped Linux VMs selected by the inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  vars:
+    utmctl_command: utmctl
+    kvm_connection: qemu:///system
+    kvm_controller_ssh_alias: ubuntu
+    kvm_controller_ssh_user: >-
+      {{ lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true) }}
+
+  tasks:
+    - name: Require exactly one inventory source selected with -i
+      ansible.builtin.assert:
+        that:
+          - ansible_inventory_sources is defined
+          - ansible_inventory_sources | length == 1
+        fail_msg: "Specify exactly one UTM/KVM inventory with -i."
+
+    - name: Resolve the selected inventory path
+      ansible.builtin.command:
+        argv:
+          - realpath
+          - "{{ ansible_inventory_sources | first }}"
+      register: linux_start_inventory_path
+      changed_when: false
+
+    - name: Parse the selected inventory
+      ansible.builtin.command:
+        argv:
+          - ansible-inventory
+          - --inventory
+          - "{{ linux_start_inventory_path.stdout }}"
+          - --list
+      register: linux_start_inventory_result
+      changed_when: false
+
+    - name: Record UTM and KVM VM names selected by the inventory
+      ansible.builtin.set_fact:
+        linux_start_inventory_hostvars: >-
+          {{ (linux_start_inventory_result.stdout | from_json)['_meta']['hostvars'] }}
+        linux_start_utm_hostvars: >-
+          {{
+            (linux_start_inventory_result.stdout | from_json)['_meta']['hostvars']
+            | dict2items
+            | selectattr('value.utm_vm_name', 'defined')
+            | items2dict
+          }}
+        linux_start_kvm_hostvars: >-
+          {{
+            (linux_start_inventory_result.stdout | from_json)['_meta']['hostvars']
+            | dict2items
+            | selectattr('value.kvm_vm_name', 'defined')
+            | items2dict
+          }}
+        linux_start_utm_vm_names: >-
+          {{
+            (linux_start_inventory_result.stdout | from_json)['_meta']['hostvars']
+            | dict2items
+            | selectattr('value.utm_vm_name', 'defined')
+            | map(attribute='value.utm_vm_name')
+            | list
+          }}
+        linux_start_kvm_vm_names: >-
+          {{
+            (linux_start_inventory_result.stdout | from_json)['_meta']['hostvars']
+            | dict2items
+            | selectattr('value.kvm_vm_name', 'defined')
+            | map(attribute='value.kvm_vm_name')
+            | list
+          }}
+
+    - name: Require at least one selected UTM or KVM VM
+      ansible.builtin.assert:
+        that:
+          - linux_start_utm_vm_names | length + linux_start_kvm_vm_names | length > 0
+        fail_msg: >-
+          The selected inventory contains no hosts with utm_vm_name or kvm_vm_name.
+
+    - name: Require each inventory host to select at most one VM backend
+      ansible.builtin.assert:
+        that:
+          - not (item.value.utm_vm_name is defined and item.value.kvm_vm_name is defined)
+          - >-
+            item.value.utm_vm_name is not defined
+            or (item.value.utm_vm_name | string | length > 0)
+          - >-
+            item.value.kvm_vm_name is not defined
+            or (item.value.kvm_vm_name | string | length > 0)
+        fail_msg: >-
+          Inventory host '{{ item.key }}' must specify a non-empty VM name for
+          at most one backend (utm_vm_name or kvm_vm_name).
+      loop: "{{ linux_start_inventory_hostvars | dict2items }}"
+
+    - name: Require VM names to be unique within each backend
+      ansible.builtin.assert:
+        that:
+          - linux_start_utm_vm_names | unique | length == linux_start_utm_vm_names | length
+          - linux_start_kvm_vm_names | unique | length == linux_start_kvm_vm_names | length
+        fail_msg: "UTM and KVM VM names must be unique within their respective backends."
+
+    - name: Resolve the invoking user's home for KVM SSH configuration
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - >-
+            import os, pwd;
+            user = os.environ.get('SUDO_USER');
+            print(pwd.getpwnam(user).pw_dir if user else os.path.expanduser('~'))
+      register: linux_start_invoking_user_home
+      changed_when: false
+      when: linux_start_kvm_vm_names | length > 0
+
+    - name: Register the Ubuntu KVM controller for SSH delegation
+      ansible.builtin.add_host:
+        name: linux_start_kvm_controller
+        groups: linux_start_kvm_controllers
+        ansible_host: "{{ kvm_controller_ssh_alias }}"
+        ansible_connection: ssh
+        ansible_user: "{{ kvm_controller_ssh_user }}"
+        ansible_ssh_private_key_file: >-
+          {{ linux_start_invoking_user_home.stdout | trim }}/.ssh/id_ed25519
+        ansible_ssh_common_args: >-
+          -F {{ linux_start_invoking_user_home.stdout | trim }}/.ssh/config
+          -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+      when: linux_start_kvm_vm_names | length > 0
+
+    - name: Read the current status of selected UTM VMs
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - status
+          - "{{ item }}"
+      loop: "{{ linux_start_utm_vm_names }}"
+      loop_control:
+        label: "{{ item }}"
+      register: linux_start_utm_status
+      changed_when: false
+
+    - name: Require selected UTM VMs to be started or stopped
+      ansible.builtin.assert:
+        that:
+          - item.stdout | trim in ['started', 'stopped']
+        fail_msg: >-
+          UTM VM '{{ item.item }}' is in state '{{ item.stdout | trim }}';
+          this playbook only starts stopped VMs.
+      loop: "{{ linux_start_utm_status.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Start stopped UTM VMs
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - start
+          - "{{ item.item }}"
+      loop: "{{ linux_start_utm_status.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.stdout | trim == 'stopped'
+      changed_when: true
+
+    - name: Verify selected UTM VMs are started
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - status
+          - "{{ item }}"
+      loop: "{{ linux_start_utm_vm_names }}"
+      loop_control:
+        label: "{{ item }}"
+      register: linux_start_utm_final_status
+      changed_when: false
+      until: linux_start_utm_final_status.stdout | trim == 'started'
+      retries: 12
+      delay: 5
+
+    - name: Read the current state of selected KVM VMs
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - domstate
+          - "{{ item }}"
+      loop: "{{ linux_start_kvm_vm_names }}"
+      loop_control:
+        label: "{{ item }}"
+      register: linux_start_kvm_status
+      changed_when: false
+      delegate_to: linux_start_kvm_controller
+      when: linux_start_kvm_vm_names | length > 0
+
+    - name: Require selected KVM VMs to be running or shut off
+      ansible.builtin.assert:
+        that:
+          - item.stdout | trim in ['running', 'shut off']
+        fail_msg: >-
+          KVM VM '{{ item.item }}' is in state '{{ item.stdout | trim }}';
+          this playbook only starts shut off VMs.
+      loop: "{{ linux_start_kvm_status.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Start shut off KVM VMs
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - start
+          - "{{ item.item }}"
+      loop: "{{ linux_start_kvm_status.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.stdout | trim == 'shut off'
+      changed_when: true
+      delegate_to: linux_start_kvm_controller
+
+    - name: Verify selected KVM VMs are running
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - domstate
+          - "{{ item }}"
+      loop: "{{ linux_start_kvm_vm_names }}"
+      loop_control:
+        label: "{{ item }}"
+      register: linux_start_kvm_final_status
+      changed_when: false
+      until: linux_start_kvm_final_status.stdout | trim == 'running'
+      retries: 12
+      delay: 5
+      delegate_to: linux_start_kvm_controller
+      when: linux_start_kvm_vm_names | length > 0
+
+    - name: Report started UTM and KVM VMs
+      ansible.builtin.debug:
+        msg: >-
+          Verified UTM VMs started:
+          {{ linux_start_utm_vm_names | join(', ') if linux_start_utm_vm_names | length else 'none' }}.
+          Verified KVM VMs running:
+          {{ linux_start_kvm_vm_names | join(', ') if linux_start_kvm_vm_names | length else 'none' }}.
