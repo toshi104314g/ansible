@@ -23,31 +23,19 @@
       fqdn: {{ item.hostname }}
       manage_etc_hosts: true
       ssh_pwauth: false
-      disable_root: {{ 'false' if item.os == 'rocky9' else 'true' }}
+      disable_root: true
       users:
-      {% if item.os != 'rocky9' %}
-        - default
-      {% endif %}
-      {% if item.os == 'rocky9' %}
-        - name: root
+        - name: {{ linux_ansible_user }}
+          gecos: Ansible automation
           lock_passwd: true
+          homedir: /var/lib/{{ linux_ansible_user }}
           shell: /bin/bash
-          ssh_authorized_keys:
-      {% for public_key in kvm_guest_ssh_public_keys %}
-            - {{ public_key | to_json }}
-      {% endfor %}
-      {% else %}
-        - name: toshiyuki
-          gecos: Toshiyuki
-          groups: [adm, sudo]
-          shell: /bin/bash
-          lock_passwd: true
+          groups: [{{ 'wheel' if item.os == 'rocky9' else 'adm, sudo' }}]
           sudo: ["ALL=(ALL) NOPASSWD:ALL"]
           ssh_authorized_keys:
       {% for public_key in kvm_guest_ssh_public_keys %}
             - {{ public_key | to_json }}
       {% endfor %}
-      {% endif %}
       packages:
         - qemu-guest-agent
         - openssh-server

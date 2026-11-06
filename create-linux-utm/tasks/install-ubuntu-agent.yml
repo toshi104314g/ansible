@@ -9,7 +9,7 @@
       - BatchMode=yes
       - -o
       - ConnectTimeout=5
-      - "{{ item.ssh_user }}@{{ item.ssh_alias }}"
+      - "{{ item.bootstrap_user }}@{{ item.ssh_alias }}"
       - sudo
       - -n
       - /usr/bin/bash

@@ -1,0 +1,92 @@
+---
+- name: Create the common Ansible account on UTM guest {{ utm_clone_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "{{ utm_clone_vm.bootstrap_user }}@{{ utm_vm_ipv6[utm_clone_vm.name] }}"
+      - "{{ 'sudo -n /usr/bin/bash -s' if utm_clone_vm.os == 'ubuntu26' else '/usr/bin/bash -s' }}"
+    stdin: |
+      set -eu
+      changed=0
+      username={{ linux_ansible_user | quote }}
+      home=/var/lib/$username
+      key={{ utm_ansible_user_public_key | quote }}
+      group={{ 'wheel' if utm_clone_vm.os == 'rocky9' else 'sudo' }}
+      if ! id "$username" >/dev/null 2>&1; then
+        useradd --create-home --home-dir "$home" --user-group --shell /bin/bash --groups "$group" "$username"
+        changed=1
+      else
+        if ! id -nG "$username" | tr ' ' '\n' | grep -Fxq "$group"; then
+          usermod --append --groups "$group" "$username"
+          changed=1
+        fi
+        if [ "$(getent passwd "$username" | cut -d: -f6)" != "$home" ]; then
+          usermod --home "$home" "$username"
+          changed=1
+        fi
+      fi
+      passwd --lock "$username" >/dev/null
+      primary_group=$(id -gn "$username")
+      chown "$username:$primary_group" "$home"
+      chmod 700 "$home"
+      install -d -o "$username" -g "$primary_group" -m 700 "$home/.ssh"
+      touch "$home/.ssh/authorized_keys"
+      if ! grep -Fxq "$key" "$home/.ssh/authorized_keys"; then
+        printf '%s\n' "$key" >> "$home/.ssh/authorized_keys"
+        changed=1
+      fi
+      chown "$username:$primary_group" "$home/.ssh/authorized_keys"
+      chmod 600 "$home/.ssh/authorized_keys"
+      sudoers_file=/etc/sudoers.d/$username
+      expected="$username ALL=(ALL) NOPASSWD: ALL"
+      if ! grep -Fxq "$expected" "$sudoers_file" 2>/dev/null; then
+        sudoers_temp=$(mktemp)
+        trap 'rm -f "$sudoers_temp"' EXIT
+        printf '%s\n' "$expected" > "$sudoers_temp"
+        chmod 440 "$sudoers_temp"
+        visudo -cf "$sudoers_temp"
+        install -m 440 "$sudoers_temp" "$sudoers_file"
+        changed=1
+      fi
+      visudo -cf "$sudoers_file"
+      if [ "$changed" -eq 1 ]; then
+        echo ansible-user-configured
+      fi
+  register: utm_ansible_user_setup
+  changed_when: "'ansible-user-configured' in utm_ansible_user_setup.stdout"
+
+- name: Verify the common Ansible account and passwordless sudo on UTM guest {{ utm_clone_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "{{ linux_ansible_user }}@{{ utm_vm_ipv6[utm_clone_vm.name] }}"
+      - sudo
+      - -n
+      - /usr/bin/true
+  register: utm_ansible_user_check
+  changed_when: false
+  until: utm_ansible_user_check.rc == 0
+  retries: "{{ utm_poll_retries }}"
+  delay: "{{ utm_poll_delay }}"

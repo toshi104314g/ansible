@@ -28,6 +28,14 @@
       ansible.builtin.import_tasks: prepare-existing.yml
       when: utm_existing_vms | length > 0
 
+    - name: Create the common Ansible account on existing UTM guests
+      ansible.builtin.include_tasks: ensure-ansible-user.yml
+      loop: "{{ utm_existing_vms }}"
+      loop_control:
+        loop_var: utm_clone_vm
+        label: "{{ utm_clone_vm.name }}"
+      when: utm_existing_vms | length > 0
+
     - name: Configure existing Rocky Linux networking
       ansible.builtin.import_tasks: configure-rocky-network.yml
       vars:

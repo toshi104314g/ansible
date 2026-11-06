@@ -41,7 +41,7 @@
       - BatchMode=yes
       - -o
       - ConnectTimeout=5
-      - "{{ item.ssh_user }}@{{ item.ssh_alias }}"
+      - "{{ item.bootstrap_user }}@{{ item.ssh_alias }}"
       - /usr/bin/hostname
   register: utm_existing_alias_hostname
   changed_when: false
@@ -111,7 +111,7 @@
       - StrictHostKeyChecking=accept-new
       - -o
       - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
-      - "{{ item.ssh_user }}@{{ utm_existing_ipv6[item.name] }}"
+      - "{{ item.bootstrap_user }}@{{ utm_existing_ipv6[item.name] }}"
       - /usr/bin/hostname
   register: utm_existing_current_hostname
   changed_when: false

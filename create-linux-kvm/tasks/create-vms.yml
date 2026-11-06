@@ -1,5 +1,5 @@
 ---
-- name: Provision Linux KVM guests from the selected inventory
+- name: Validate the selected Linux KVM inventory
   hosts: localhost
   connection: local
   gather_facts: false
@@ -19,21 +19,100 @@
       ansible.builtin.import_tasks: check-prerequisites.yml
       when: kvm_clone_vms | length > 0
 
-    - name: Require all template images in the selected storage pool
-      ansible.builtin.import_tasks: check-template-images.yml
+    - name: Save all KVM clones before provisioning them individually
+      ansible.builtin.set_fact:
+        kvm_all_clone_vms: >-
+          {{
+            kvm_clone_vms
+            | rejectattr(
+                'inventory_hostname',
+                'in',
+                kvm_pre_skipped_hosts | default([])
+              )
+            | list
+          }}
+        kvm_pre_skipped_hostnames: "{{ kvm_pre_skipped_hosts | default([]) }}"
       when: kvm_clone_vms | length > 0
 
-    - name: Prepare cloud-init data for cloned guests
-      ansible.builtin.import_tasks: prepare-cloud-init.yml
-      when: kvm_clone_vms | length > 0
+- name: Provision KVM clones concurrently
+  hosts: all
+  connection: local
+  gather_facts: false
+  strategy: free
 
-    - name: Clone and start KVM guests
-      ansible.builtin.import_tasks: clone-vms.yml
-      when: kvm_clone_vms | length > 0
+  vars_files:
+    - ../vars.yml
+  vars:
+    kvm_inventory_hostvars: "{{ hostvars['localhost'].kvm_inventory_hostvars }}"
+    kvm_domain_names: "{{ hostvars['localhost'].kvm_domain_names | default([]) }}"
+    kvm_storage_pool: "{{ hostvars['localhost'].kvm_storage_pool }}"
+    kvm_network_mode: "{{ hostvars['localhost'].kvm_network_mode }}"
+    kvm_network_name: "{{ hostvars['localhost'].kvm_network_name }}"
+    kvm_guest_ssh_public_keys: "{{ hostvars['localhost'].kvm_guest_ssh_public_keys }}"
 
-    - name: Wait for guest SSH and verify provisioned identities
-      ansible.builtin.import_tasks: verify-guests.yml
-      when: kvm_clone_vms | length > 0
+  tasks:
+    - name: Prepare this host's KVM clone
+      ansible.builtin.set_fact:
+        kvm_clone_vm: >-
+          {{
+            hostvars['localhost'].kvm_all_clone_vms
+            | selectattr('inventory_hostname', 'equalto', inventory_hostname)
+            | first
+          }}
+        kvm_clone_vms: >-
+          {{
+            hostvars['localhost'].kvm_all_clone_vms
+            | selectattr('inventory_hostname', 'equalto', inventory_hostname)
+            | list
+          }}
+        kvm_failed_clone_hostnames: []
+        kvm_ssh_known_hosts_file: >-
+          {{ lookup('env', 'HOME') }}/.ssh/known_hosts.ansible-kvm.{{ inventory_hostname }}
+      when: >-
+        hostvars['localhost'].kvm_all_clone_vms | default([])
+        | selectattr('inventory_hostname', 'equalto', inventory_hostname)
+        | list | length > 0
+      tags:
+        - create
+
+    - name: Provision this KVM clone independently
+      ansible.builtin.include_tasks:
+        file: provision-clone.yml
+        apply:
+          tags:
+            - create
+      when: kvm_clone_vm is defined
+      tags:
+        - create
+
+- name: Report KVM provisioning results and configure existing guests
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  vars_files:
+    - ../vars.yml
+
+  tasks:
+    - name: Collect KVM clones skipped after provisioning errors
+      ansible.builtin.set_fact:
+        kvm_failed_clone_hostnames: >-
+          {{
+            (
+              (hostvars['localhost'].kvm_pre_skipped_hostnames | default([]))
+              +
+              (
+                hostvars | dict2items
+                | selectattr('value.kvm_failed_clone_hostnames', 'defined')
+                | map(attribute='value.kvm_failed_clone_hostnames')
+                | flatten
+              )
+            ) | unique | list
+          }}
+      when: "'delete' not in ansible_run_tags"
+      tags:
+        - always
 
     - name: Start and configure existing KVM guests
       ansible.builtin.import_tasks: configure-existing.yml
@@ -43,3 +122,11 @@
       ansible.builtin.import_tasks: update-hosts.yml
       tags:
         - hosts_file
+
+    - name: Report KVM guests skipped after provisioning errors
+      ansible.builtin.debug:
+        msg: "KVM_SKIPPED_GUEST: {{ item }}"
+      loop: "{{ kvm_failed_clone_hostnames | default([]) }}"
+      when: "'delete' not in ansible_run_tags"
+      tags:
+        - always

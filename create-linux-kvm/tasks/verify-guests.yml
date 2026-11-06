@@ -24,54 +24,6 @@
       {{ kvm_network_mode }} '{{ kvm_network_name }}'.
   loop: "{{ kvm_guest_interfaces.results }}"
 
-- name: Wait for cloned KVM guests to accept SSH
-  ansible.builtin.command:
-    argv:
-      - ssh
-      - -i
-      - "{{ kvm_ssh_private_key_file }}"
-      - -o
-      - BatchMode=yes
-      - -o
-      - ConnectTimeout=5
-      - -o
-      - StrictHostKeyChecking=accept-new
-      - -o
-      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
-      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
-      - /usr/bin/true
-  register: kvm_ssh_check
-  changed_when: false
-  until: kvm_ssh_check.rc == 0
-  retries: "{{ kvm_poll_retries }}"
-  delay: "{{ kvm_poll_delay }}"
-  loop: "{{ kvm_clone_vms }}"
-
-- name: Wait for cloned guests to finish cloud-init
-  ansible.builtin.command:
-    argv:
-      - ssh
-      - -i
-      - "{{ kvm_ssh_private_key_file }}"
-      - -o
-      - BatchMode=yes
-      - -o
-      - ConnectTimeout=5
-      - -o
-      - StrictHostKeyChecking=accept-new
-      - -o
-      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
-      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
-      - cloud-init
-      - status
-      - --wait
-  register: kvm_cloud_init_status
-  changed_when: false
-  until: kvm_cloud_init_status.rc != 255
-  retries: "{{ kvm_poll_retries }}"
-  delay: "{{ kvm_poll_delay }}"
-  loop: "{{ kvm_clone_vms }}"
-
 - name: Ensure SELinux is disabled on Rocky guests
   ansible.builtin.import_tasks: disable-rocky-selinux.yml
 
@@ -166,7 +118,7 @@
   changed_when: false
   loop: "{{ kvm_clone_vms }}"
 
-- name: Verify Ubuntu guests have passwordless sudo
+- name: Verify cloned guests have passwordless sudo
   ansible.builtin.command:
     argv:
       - ssh
@@ -178,12 +130,12 @@
       - StrictHostKeyChecking=accept-new
       - -o
       - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
-      - "toshiyuki@{{ item.ipv4_address }}"
+      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
       - sudo
       - -n
       - "true"
   become: false
-  loop: "{{ kvm_clone_vms | selectattr('os', 'equalto', 'ubuntu26') | list }}"
+  loop: "{{ kvm_clone_vms }}"
   changed_when: false
 
 - name: Report provisioned KVM guests

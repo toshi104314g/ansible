@@ -2,6 +2,7 @@
 kvm_connection: qemu:///system
 kvm_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519"
 kvm_ssh_public_key_file: "{{ kvm_ssh_private_key_file }}.pub"
+linux_ansible_user: ansible-user
 kvm_additional_ssh_public_key_file: ""
 kvm_ssh_known_hosts_file: "{{ lookup('env', 'HOME') }}/.ssh/known_hosts.ansible-kvm"
 kvm_poll_retries: 60

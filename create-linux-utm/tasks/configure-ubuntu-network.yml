@@ -14,7 +14,7 @@
       - StrictHostKeyChecking=accept-new
       - -o
       - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
-      - "toshiyuki@{{ utm_vm_ipv6[item.name] }}"
+      - "{{ item.ssh_user }}@{{ utm_vm_ipv6[item.name] }}"
       - sudo
       - -n
       - /usr/bin/bash
@@ -71,7 +71,7 @@
       - StrictHostKeyChecking=accept-new
       - -o
       - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
-      - "toshiyuki@{{ utm_vm_ipv6[item.name] }}"
+      - "{{ item.ssh_user }}@{{ utm_vm_ipv6[item.name] }}"
       - sudo
       - -n
       - /usr/bin/bash

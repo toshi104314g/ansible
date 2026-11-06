@@ -56,7 +56,7 @@
       - StrictHostKeyChecking=accept-new
       - -o
       - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
-      - "{{ item.ssh_user }}@{{ utm_vm_ipv6[item.name] }}"
+      - "{{ item.bootstrap_user }}@{{ utm_vm_ipv6[item.name] }}"
       - /usr/bin/true
   register: utm_ssh_check
   changed_when: false

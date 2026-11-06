@@ -10,11 +10,16 @@ Each host in the selected inventory must set:
 - `ansible_host`: the guest's reserved static IPv4 address
 - `kvm_provision`: `clone` or `existing`
 
-Network and storage settings may be inherited from inventory groups or `all.vars`: specify exactly one of `kvm_network_name` (an active libvirt network) or `kvm_bridge_name` (an existing Linux bridge), along with `kvm_storage_pool`, `kvm_ipv4_prefix_length`, `kvm_ipv4_gateway`, and `kvm_ipv4_dns_servers`. The example inventory uses distinct template images for each OS. `rocky9` guests receive SSH access as `root`; `ubuntu26` guests receive the controller's public key for `toshiyuki`, configured with passwordless sudo. An optional `kvm_additional_ssh_public_key_file` adds another public key to cloned guests and to existing guests' `authorized_keys`. Private keys are never copied into guests or committed.
+Network and storage settings may be inherited from inventory groups or `all.vars`: specify exactly one of `kvm_network_name` (an active libvirt network) or `kvm_bridge_name` (an existing Linux bridge), along with `kvm_storage_pool`, `kvm_ipv4_prefix_length`, `kvm_ipv4_gateway`, and `kvm_ipv4_dns_servers`. Cloned guests of both OSes receive the shared `ansible-user` account with passwordless sudo and the public key matching the controller's existing `~/.ssh/id_ed25519`. Set `ansible_user: ansible-user` and `ansible_ssh_private_key_file` in the inventory for subsequent Ansible commands. An optional `kvm_additional_ssh_public_key_file` adds another public key to cloned guests and to existing guests' `authorized_keys`. Private keys are never copied into guests or committed.
+The existing-guest configuration path likewise creates and verifies `ansible-user` using the existing OS-specific SSH account as a bootstrap.
 
 [`inventory_linux_kvm_br0.example.yml`](../inventory/inventory_linux_kvm_br0.example.yml) shows a mixed-OS inventory using addresses in `192.168.10.0/24`. It sets `kvm_bridge_name: br0`, so each VM interface connects directly to the host's existing Linux bridge—no intermediary libvirt network is created or required. The playbook verifies that the bridge exists and is up. Use addresses reserved for these VMs. Clone provisioning uses static IPv4 (`dhcp4: false`), enables DHCPv6 and IPv6 router advertisements (`dhcp6: true`, `accept-ra: true`), and configures Rocky guests to boot with SELinux disabled. Verification checks these settings and requires a dynamic global IPv6 address plus a default route learned from router advertisements. Ubuntu cloud images do not enable SELinux by default.
 
 The controller requires `virsh`, `virt-install`, `qemu-img`, cloud-init-capable template images, the libvirt/KVM services, and permission to manage system libvirt and the selected storage pool. The templates should expose their primary virtio interface as `eth0` on Rocky Linux and `ens3` on Ubuntu so cloud-init can apply the IP configuration. The playbook creates and validates guest disks and domains, configures static IPv4 plus DHCPv6/router-advertisement IPv6 through cloud-init, installs and starts `qemu-guest-agent` through a virtio channel, waits for cloud-init and the guest agent to finish starting, and verifies SSH access, hostname, address, and Ubuntu NOPASSWD sudo. Templates and storage volumes are not modified.
+
+Cloned guests are provisioned concurrently as independent inventory hosts. Ansible's `forks` setting limits the number running at once; use `-f` to override it for a run (for example, `-f 8`). Each guest uses its own SSH known-hosts file during provisioning to avoid concurrent writes to a shared file. A guest is skipped with a warning if its KVM domain name differs from its inventory hostname, its name collides with its template image, or any guest-specific provisioning or verification task fails. The current guest hostname is checked before additional guest configuration. Other clones continue, and skipped guests are excluded from the controller hosts-file update.
+
+Before provisioning each clone, its IPv4 address is checked against the Ubuntu controller's `/etc/hosts`; an address already assigned to another hostname causes only that clone to be skipped. When run through the Mac wrapper, the Mac `/etc/hosts` is checked too.
 
 ## Prepare the KVM host
 
@@ -45,7 +50,7 @@ virsh net-autostart ansible-kvm
 
 Place one cloud-init-capable qcow2 image for each OS in the selected libvirt storage pool. For example, download the official Ubuntu 26.04 cloud image to a temporary location, then import it into the `default` pool as `ubuntu-26.04-cloudimg-amd64.img`. Do not use an installed VM's active disk as a template. Rocky images should be compatible with cloud-init and support root SSH keys.
 
-Ensure the KVM controller has `~/.ssh/id_ed25519` and its matching `~/.ssh/id_ed25519.pub`; cloud-init installs the public key into the guest. The playbook uses a separate `~/.ssh/known_hosts.ansible-kvm` file.
+Ensure the KVM controller has `~/.ssh/id_ed25519` and its matching `~/.ssh/id_ed25519.pub`; cloud-init installs that public key into `ansible-user` on the guest. The playbook uses a separate `~/.ssh/known_hosts.ansible-kvm` file.
 
 ## Run
 

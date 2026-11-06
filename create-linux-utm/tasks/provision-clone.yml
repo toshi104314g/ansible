@@ -1,0 +1,175 @@
+---
+- name: Provision UTM clone {{ utm_clone_vm.name }}
+  block:
+    - name: Set the active UTM clone
+      ansible.builtin.set_fact:
+        utm_clone_vms:
+          - "{{ utm_clone_vm }}"
+        utm_current_clone_initial_status: unknown
+        utm_current_clone_hostname: unknown
+
+    - name: Require UTM VM name and inventory hostname to match
+      ansible.builtin.assert:
+        that:
+          - utm_clone_vm.name == utm_clone_vm.hostname
+        fail_msg: >-
+          UTM VM name '{{ utm_clone_vm.name }}' does not match inventory hostname
+          '{{ utm_clone_vm.hostname }}'; this VM will be skipped.
+
+    - name: Check whether the UTM guest IPv4 address conflicts with Mac hosts entries
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../create-linux-kvm/check-hosts-ip.py"
+          - "{{ utm_clone_vm.ipv4_address }}"
+          - "{{ utm_clone_vm.hostname }}"
+      register: utm_hosts_ip_check
+      changed_when: false
+      failed_when: utm_hosts_ip_check.rc not in [0, 1]
+
+    - name: Refuse to create the UTM guest when its IPv4 address is already assigned
+      ansible.builtin.assert:
+        that:
+          - utm_hosts_ip_check.rc == 0
+        fail_msg: >-
+          UTM guest '{{ utm_clone_vm.hostname }}' will be skipped because
+          {{ utm_clone_vm.ipv4_address }} is assigned to another name in Mac /etc/hosts:
+          {{ utm_hosts_ip_check.stdout | trim }}.
+
+    - name: Record UTM VM state before provisioning
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - list
+      register: utm_current_clone_initial_list
+      changed_when: false
+
+    - name: Record whether this UTM VM already exists
+      ansible.builtin.set_fact:
+        utm_current_clone_was_registered: >-
+          {{
+            utm_current_clone_initial_list.stdout_lines
+            | select('search', '\s' ~ (utm_clone_vm.name | regex_escape) ~ '$')
+            | list | length > 0
+          }}
+
+    - name: Record the initial state of an existing UTM VM
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - status
+          - "{{ utm_clone_vm.name }}"
+      register: utm_current_clone_status
+      changed_when: false
+      when: utm_current_clone_was_registered
+
+    - name: Save the initial state of an existing UTM VM
+      ansible.builtin.set_fact:
+        utm_current_clone_initial_status: "{{ utm_current_clone_status.stdout | trim }}"
+      when: utm_current_clone_was_registered
+
+    - name: Require the UTM template to be available and stopped
+      ansible.builtin.import_tasks: prepare-templates.yml
+
+    - name: Clone and start the UTM VM
+      ansible.builtin.import_tasks: clone-vms.yml
+
+    - name: Discover the UTM VM address and verify SSH
+      ansible.builtin.import_tasks: discover-clones.yml
+
+    - name: Read the current guest hostname before configuring it
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -6
+          - -i
+          - "{{ utm_ssh_private_key_file }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - ConnectTimeout=5
+          - -o
+          - StrictHostKeyChecking=accept-new
+          - -o
+          - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+          - "{{ utm_clone_vm.bootstrap_user }}@{{ utm_vm_ipv6[utm_clone_vm.name] }}"
+          - /usr/bin/hostname
+      register: utm_current_clone_hostname_result
+      changed_when: false
+
+    - name: Record the current guest hostname
+      ansible.builtin.set_fact:
+        utm_current_clone_hostname: "{{ utm_current_clone_hostname_result.stdout | trim }}"
+
+    - name: Require the guest hostname to match the inventory or a clean template default
+      ansible.builtin.assert:
+        that:
+          - >-
+            utm_current_clone_hostname in
+            (
+              [utm_clone_vm.hostname, 'localhost.localdomain']
+              if utm_clone_vm.os == 'rocky9'
+              else [utm_clone_vm.hostname, 'localhost', 'localhost.localdomain']
+            )
+        fail_msg: >-
+          UTM VM '{{ utm_clone_vm.name }}' has guest hostname
+          '{{ utm_current_clone_hostname }}', expected '{{ utm_clone_vm.hostname }}'.
+          This VM will be skipped without changing its guest configuration.
+
+    - name: Initialize Rocky Linux clone identity
+      ansible.builtin.import_tasks: initialize-rocky.yml
+      when: utm_clone_vm.os == 'rocky9'
+
+    - name: Initialize Ubuntu clone identity
+      ansible.builtin.import_tasks: initialize-ubuntu.yml
+      when: utm_clone_vm.os == 'ubuntu26'
+
+    - name: Create the common passwordless-sudo Ansible user
+      ansible.builtin.include_tasks: ensure-ansible-user.yml
+
+    - name: Configure Rocky Linux clone networking
+      ansible.builtin.import_tasks: configure-rocky-network.yml
+      when: utm_clone_vm.os == 'rocky9'
+
+    - name: Configure Ubuntu clone networking
+      ansible.builtin.import_tasks: configure-ubuntu-network.yml
+      when: utm_clone_vm.os == 'ubuntu26'
+
+  rescue:
+    - name: Restore the initial stopped state for a failed existing UTM VM
+      ansible.builtin.command:
+        argv:
+          - "{{ utmctl_command }}"
+          - stop
+          - "{{ utm_clone_vm.name }}"
+      register: utm_current_clone_restore_stop
+      failed_when: false
+      changed_when: utm_current_clone_restore_stop.rc == 0
+      when:
+        - utm_current_clone_was_registered | default(false)
+        - utm_current_clone_initial_status | default('unknown') == 'stopped'
+
+    - name: Warn if a failed existing UTM VM could not be stopped
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: Failed to restore UTM VM '{{ utm_clone_vm.name }}' to its
+          initial stopped state: {{ utm_current_clone_restore_stop.stderr | default('unknown error') }}.
+      when:
+        - utm_current_clone_restore_stop is defined
+        - utm_current_clone_restore_stop.rc | default(0) | int != 0
+
+    - name: Record the skipped UTM clone
+      ansible.builtin.set_fact:
+        utm_failed_clone_hostnames: >-
+          {{
+            (utm_failed_clone_hostnames | default([]))
+            + [utm_clone_vm.hostname]
+          }}
+
+    - name: Warn that this UTM clone was skipped
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: Skipping UTM VM '{{ utm_clone_vm.name }}'.
+          Failed task: {{ ansible_failed_task.name | default('unknown task') }}.
+          {{ ansible_failed_result.msg
+             | default(ansible_failed_result.stderr | default('No error details were returned.')) }}

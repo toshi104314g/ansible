@@ -1,0 +1,76 @@
+---
+- name: Wait for KVM guest {{ kvm_clone_vm.name }} to accept SSH
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ kvm_clone_vm.ssh_user }}@{{ kvm_clone_vm.ipv4_address }}"
+      - /usr/bin/true
+  register: kvm_current_clone_ssh_check
+  changed_when: false
+  until: kvm_current_clone_ssh_check.rc == 0
+  retries: "{{ kvm_poll_retries }}"
+  delay: "{{ kvm_poll_delay }}"
+
+- name: Wait for KVM guest {{ kvm_clone_vm.name }} cloud-init
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ kvm_clone_vm.ssh_user }}@{{ kvm_clone_vm.ipv4_address }}"
+      - sudo
+      - -n
+      - cloud-init
+      - status
+      - --wait
+  register: kvm_current_clone_cloud_init
+  changed_when: false
+  until: kvm_current_clone_cloud_init.rc != 255
+  retries: "{{ kvm_poll_retries }}"
+  delay: "{{ kvm_poll_delay }}"
+
+- name: Read KVM guest {{ kvm_clone_vm.name }} hostname
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ kvm_clone_vm.ssh_user }}@{{ kvm_clone_vm.ipv4_address }}"
+      - /usr/bin/hostname
+  register: kvm_current_clone_hostname_result
+  changed_when: false
+
+- name: Require KVM guest {{ kvm_clone_vm.name }} hostname to match inventory
+  ansible.builtin.assert:
+    that:
+      - kvm_current_clone_hostname_result.stdout | trim == kvm_clone_vm.hostname
+    fail_msg: >-
+      KVM guest '{{ kvm_clone_vm.name }}' reports hostname
+      '{{ kvm_current_clone_hostname_result.stdout | trim }}', expected
+      '{{ kvm_clone_vm.hostname }}'; this guest will be skipped.

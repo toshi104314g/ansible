@@ -14,7 +14,9 @@
       - StrictHostKeyChecking=accept-new
       - -o
       - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
-      - "root@{{ utm_vm_ipv6[item.name] }}"
+      - "{{ item.ssh_user }}@{{ utm_vm_ipv6[item.name] }}"
+      - sudo
+      - -n
       - /usr/bin/bash
       - -s
     stdin: |
@@ -57,7 +59,9 @@
       - StrictHostKeyChecking=accept-new
       - -o
       - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
-      - "root@{{ utm_vm_ipv6[item.name] }}"
+      - "{{ item.ssh_user }}@{{ utm_vm_ipv6[item.name] }}"
+      - sudo
+      - -n
       - /usr/bin/bash
       - -s
     stdin: |

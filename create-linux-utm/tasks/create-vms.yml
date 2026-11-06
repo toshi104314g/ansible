@@ -1,5 +1,5 @@
 ---
-- name: Provision Linux UTM VMs from the selected inventory
+- name: Validate the selected Linux UTM inventory
   hosts: localhost
   connection: local
   gather_facts: false
@@ -22,33 +22,88 @@
       tags:
         - hosts_file
 
-    - name: Verify all templates are registered and stopped
-      ansible.builtin.import_tasks: prepare-templates.yml
+    - name: Save all UTM clones before provisioning them individually
+      ansible.builtin.set_fact:
+        utm_all_clone_vms: "{{ utm_clone_vms }}"
       when: utm_clone_vms | length > 0
 
-    - name: Clone and start configured virtual machines
-      ansible.builtin.import_tasks: clone-vms.yml
-      when: utm_clone_vms | length > 0
+- name: Provision UTM clones concurrently
+  hosts: all
+  connection: local
+  gather_facts: false
+  strategy: free
 
-    - name: Discover clone IPv6 addresses and verify SSH
-      ansible.builtin.import_tasks: discover-clones.yml
-      when: utm_clone_vms | length > 0
+  vars_files:
+    - ../vars.yml
+  vars:
+    utm_inventory_hostvars: "{{ hostvars['localhost'].utm_inventory_hostvars }}"
+    utm_ansible_user_public_key: "{{ hostvars['localhost'].utm_ansible_user_public_key }}"
 
-    - name: Initialize Rocky Linux clone identities
-      ansible.builtin.import_tasks: initialize-rocky.yml
-      when: utm_clone_vms | selectattr('os', 'equalto', 'rocky9') | list | length > 0
+  tasks:
+    - name: Prepare this host's UTM clone
+      ansible.builtin.set_fact:
+        utm_clone_vm: >-
+          {{
+            hostvars['localhost'].utm_all_clone_vms
+            | selectattr('hostname', 'equalto', inventory_hostname)
+            | first
+          }}
+        utm_clone_vms: >-
+          {{
+            hostvars['localhost'].utm_all_clone_vms
+            | selectattr('hostname', 'equalto', inventory_hostname)
+            | list
+          }}
+        utm_failed_clone_hostnames: []
+        utm_ssh_known_hosts_file: >-
+          {{ lookup('env', 'HOME') }}/.ssh/known_hosts.ansible-utm.{{ inventory_hostname }}
+      when: >-
+        hostvars['localhost'].utm_all_clone_vms | default([])
+        | selectattr('hostname', 'equalto', inventory_hostname)
+        | list | length > 0
+      tags:
+        - create
 
-    - name: Initialize Ubuntu clone identities
-      ansible.builtin.import_tasks: initialize-ubuntu.yml
-      when: utm_clone_vms | selectattr('os', 'equalto', 'ubuntu26') | list | length > 0
+    - name: Provision this UTM clone independently
+      ansible.builtin.include_tasks:
+        file: provision-clone.yml
+        apply:
+          tags:
+            - create
+      when: utm_clone_vm is defined
+      tags:
+        - create
 
-    - name: Configure Rocky Linux clone networking
-      ansible.builtin.import_tasks: configure-rocky-network.yml
-      when: utm_clone_vms | selectattr('os', 'equalto', 'rocky9') | list | length > 0
+- name: Report UTM provisioning results and update the hosts file
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
 
-    - name: Configure Ubuntu clone networking
-      ansible.builtin.import_tasks: configure-ubuntu-network.yml
-      when: utm_clone_vms | selectattr('os', 'equalto', 'ubuntu26') | list | length > 0
+  vars_files:
+    - ../vars.yml
+
+  tasks:
+    - name: Collect UTM clones skipped after provisioning errors
+      ansible.builtin.set_fact:
+        utm_failed_clone_hostnames: >-
+          {{
+            hostvars | dict2items
+            | selectattr('value.utm_failed_clone_hostnames', 'defined')
+            | map(attribute='value.utm_failed_clone_hostnames')
+            | flatten | unique | list
+          }}
+      when: "'delete' not in ansible_run_tags"
+      tags:
+        - always
+
+    - name: Report UTM guests skipped after provisioning errors
+      ansible.builtin.debug:
+        msg: "UTM_SKIPPED_GUEST: {{ item }}"
+      loop: "{{ utm_failed_clone_hostnames | default([]) }}"
+      when: "'delete' not in ansible_run_tags"
+      tags:
+        - always
 
     - name: Update the Mac hosts file from the selected inventory
       ansible.builtin.import_tasks: update-hosts.yml

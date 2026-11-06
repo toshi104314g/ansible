@@ -73,13 +73,11 @@
       - item.value.kvm_ipv4_gateway is defined
       - item.value.kvm_ipv4_dns_servers is defined
       - item.value.kvm_ipv4_dns_servers | length > 0
-      - item.value.kvm_os != 'ubuntu26' or (item.value.ansible_user | default('toshiyuki')) == 'toshiyuki'
     fail_msg: >-
       Host '{{ item.key }}' must specify kvm_os (rocky9 or ubuntu26),
       kvm_template_image, kvm_vm_name, kvm_provision, ansible_host,
       exactly one of kvm_network_name or kvm_bridge_name, kvm_storage_pool,
       and IPv4 network settings.
-      Ubuntu hosts use the toshiyuki SSH user.
   loop: "{{ kvm_inventory_hostvars | dict2items }}"
 
 - name: Require unique VM names and IPv4 addresses
@@ -123,6 +121,24 @@
 - name: Record the public key for cloud-init
   ansible.builtin.set_fact:
     kvm_ssh_public_key: "{{ lookup('ansible.builtin.file', kvm_ssh_public_key_file) | trim }}"
+  no_log: true
+
+- name: Derive the KVM management public key from the private key
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -y
+      - -f
+      - "{{ kvm_ssh_private_key_file }}"
+  register: kvm_derived_ssh_public_key
+  changed_when: false
+  no_log: true
+
+- name: Require the KVM public and private keys to match
+  ansible.builtin.assert:
+    that:
+      - kvm_derived_ssh_public_key.stdout.split()[:2] == kvm_ssh_public_key.split()[:2]
+    fail_msg: "The KVM SSH public key does not match the configured private key."
   no_log: true
 
 - name: Check the optional additional guest SSH public key
@@ -170,7 +186,8 @@
           'hostname': item.key,
           'name': item.value.kvm_vm_name,
           'os': item.value.kvm_os,
-          'ssh_user': 'root' if item.value.kvm_os == 'rocky9' else 'toshiyuki',
+          'ssh_user': linux_ansible_user,
+          'bootstrap_user': 'root' if item.value.kvm_os == 'rocky9' else 'toshiyuki',
           'template_image': item.value.kvm_template_image | basename,
           'ipv4_address': item.value.ansible_host,
           'network_name': item.value.kvm_network_name | default(''),
@@ -190,7 +207,8 @@
           'hostname': item.key,
           'name': item.value.kvm_vm_name,
           'os': item.value.kvm_os,
-          'ssh_user': 'root' if item.value.kvm_os == 'rocky9' else 'toshiyuki',
+          'ssh_user': linux_ansible_user,
+          'bootstrap_user': 'root' if item.value.kvm_os == 'rocky9' else 'toshiyuki',
           'ipv4_address': item.value.ansible_host,
           'network_name': item.value.kvm_network_name | default(''),
           'bridge_name': item.value.kvm_bridge_name | default(''),

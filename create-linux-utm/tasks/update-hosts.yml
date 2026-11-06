@@ -12,10 +12,23 @@
     regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
     line: "{{ item.value.ansible_host }} {{ item.key }}"
   become: true
-  loop: "{{ utm_inventory_hostvars | dict2items }}"
+  loop: >-
+    {{
+      utm_inventory_hostvars
+      | dict2items
+      | rejectattr('key', 'in', utm_failed_clone_hostnames | default([]))
+      | list
+    }}
 
 - name: Report inventory host entries written to the Mac hosts file
   ansible.builtin.debug:
     msg: >-
       Updated /etc/hosts entries for
-      {{ utm_inventory_hostvars.keys() | list | join(', ') }}.
+      {{
+        utm_inventory_hostvars
+        | dict2items
+        | rejectattr('key', 'in', utm_failed_clone_hostnames | default([]))
+        | map(attribute='key')
+        | list
+        | join(', ')
+      }}.

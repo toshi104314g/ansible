@@ -9,10 +9,30 @@
 
   vars:
     kvm_controller_ssh_alias: ubuntu
-    kvm_mac_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519"
-    kvm_mac_ssh_public_key_file: "{{ kvm_mac_ssh_private_key_file }}.pub"
+    kvm_controller_ssh_user: >-
+      {{ lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true) }}
 
   tasks:
+    - name: Resolve the home directory of the invoking Mac user
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - >-
+            import os, pwd;
+            user = os.environ.get('SUDO_USER');
+            print(pwd.getpwnam(user).pw_dir if user else os.path.expanduser('~'))
+      register: kvm_controller_user_home_result
+      changed_when: false
+
+    - name: Set the Mac user's SSH key paths
+      ansible.builtin.set_fact:
+        kvm_controller_user_home: "{{ kvm_controller_user_home_result.stdout | trim }}"
+        kvm_mac_ssh_private_key_file: >-
+          {{ kvm_controller_user_home_result.stdout | trim }}/.ssh/id_ed25519
+        kvm_mac_ssh_public_key_file: >-
+          {{ kvm_controller_user_home_result.stdout | trim }}/.ssh/id_ed25519.pub
+
     - name: Require exactly one inventory source selected with -i
       ansible.builtin.assert:
         that:
@@ -116,6 +136,51 @@
       no_log: true
       when: kvm_wrapper_action == 'create'
 
+    - name: Check cloned KVM guest IPs against Mac hosts entries
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../create-linux-kvm/check-hosts-ip.py"
+          - "{{ item.value.ansible_host }}"
+          - "{{ item.key }}"
+      register: kvm_mac_hosts_ip_checks
+      changed_when: false
+      failed_when: kvm_mac_hosts_ip_checks.rc not in [0, 1]
+      loop: >-
+        {{
+          kvm_selected_guest_hostvars
+          | dict2items
+          | selectattr('value.kvm_provision', 'equalto', 'clone')
+          | list
+        }}
+      loop_control:
+        label: "{{ item.key }}"
+      when: kvm_wrapper_action == 'create'
+
+    - name: Record KVM guests whose IPs conflict with Mac hosts entries
+      ansible.builtin.set_fact:
+        kvm_mac_hosts_conflicting_guest_hostnames: >-
+          {{
+            kvm_mac_hosts_ip_checks.results | default([])
+            | selectattr('rc', 'equalto', 1)
+            | map(attribute='item.key')
+            | list
+          }}
+      when: kvm_wrapper_action == 'create'
+
+    - name: Warn about KVM guests skipped due to Mac hosts conflicts
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: KVM_SKIPPED_GUEST: {{ item.item.key }}.
+          {{ item.item.value.ansible_host }} is assigned to another name in Mac /etc/hosts:
+          {{ item.stdout | trim }}.
+      loop: "{{ kvm_mac_hosts_ip_checks.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.key }}"
+      when:
+        - kvm_wrapper_action == 'create'
+        - item.rc | int == 1
+
     - name: Confirm deletion of inventory KVM virtual machines
       ansible.builtin.pause:
         prompt: >-
@@ -163,6 +228,12 @@
         groups: kvm_remote_execution_hosts
         ansible_host: "{{ kvm_controller_ssh_alias }}"
         ansible_connection: ssh
+        ansible_user: "{{ kvm_controller_ssh_user }}"
+        ansible_ssh_private_key_file: "{{ kvm_mac_ssh_private_key_file }}"
+        ansible_ssh_common_args: >-
+          -F {{ kvm_controller_user_home }}/.ssh/config
+          -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
 
 - name: Run KVM provisioning on the Ubuntu host
   hosts: localhost
@@ -231,7 +302,10 @@
                         kvm_remote_workspace.path ~ '/mac-id_ed25519.pub'
                         if hostvars['localhost']['kvm_wrapper_action'] == 'create' else '',
                       'kvm_delete_confirmed':
-                        hostvars['localhost']['kvm_wrapper_action'] == 'delete'
+                        hostvars['localhost']['kvm_wrapper_action'] == 'delete',
+                      'kvm_pre_skipped_hosts':
+                        hostvars['localhost']['kvm_mac_hosts_conflicting_guest_hostnames']
+                        | default([])
                     } | to_json
                   ]
               }}
@@ -249,12 +323,33 @@
           ansible.builtin.debug:
             var: kvm_remote_playbook_result.stdout_lines
 
+        - name: Record KVM guests skipped after provisioning errors
+          ansible.builtin.set_fact:
+            kvm_remote_failed_guest_hostnames: >-
+              {{
+                kvm_remote_playbook_result.stdout
+                | regex_findall('KVM_SKIPPED_GUEST: ([A-Za-z0-9_.-]+)')
+                | unique
+                | list
+              }}
+          when: hostvars['localhost']['kvm_wrapper_action'] == 'create'
+
         - name: Update Ubuntu hosts entries for selected KVM guests
           ansible.builtin.lineinfile:
             path: /etc/hosts
             regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
             line: "{{ item.value.ansible_host }} {{ item.key }}"
-          loop: "{{ hostvars['localhost']['kvm_selected_guest_hostvars'] | dict2items }}"
+          loop: >-
+            {{
+              hostvars['localhost']['kvm_selected_guest_hostvars']
+              | dict2items
+              | rejectattr(
+                  'key',
+                  'in',
+                  hostvars['localhost']['kvm_remote_failed_guest_hostnames'] | default([])
+                )
+              | list
+            }}
           become: true
           delegate_to: kvm_remote_execution_host
           vars:
@@ -267,7 +362,18 @@
           ansible.builtin.debug:
             msg: >-
               Added or updated Ubuntu /etc/hosts entries for
-              {{ hostvars['localhost']['kvm_selected_guest_hostvars'].keys() | list | join(', ') }}.
+              {{
+                hostvars['localhost']['kvm_selected_guest_hostvars']
+                | dict2items
+                | rejectattr(
+                    'key',
+                    'in',
+                    hostvars['localhost']['kvm_remote_failed_guest_hostnames'] | default([])
+                  )
+                | map(attribute='key')
+                | list
+                | join(', ')
+              }}.
           when:
             - hostvars['localhost']['kvm_wrapper_action'] == 'create'
             - "'ubuntu_hosts_file' in ansible_run_tags"
@@ -285,9 +391,21 @@
         path: /etc/hosts
         regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
         line: "{{ item.value.ansible_host }} {{ item.key }}"
-      loop: "{{ hostvars['localhost']['kvm_selected_guest_hostvars'] | dict2items }}"
+      loop: >-
+        {{
+          hostvars['localhost']['kvm_selected_guest_hostvars']
+          | dict2items
+          | rejectattr(
+              'key',
+              'in',
+              hostvars['localhost']['kvm_remote_failed_guest_hostnames'] | default([])
+            )
+          | list
+        }}
       become: true
-      when: hostvars['localhost']['kvm_wrapper_action'] == 'create'
+      when:
+        - hostvars['localhost']['kvm_wrapper_action'] == 'create'
+        - not (kvm_skip_mac_hosts_file | default(false) | bool)
       register: kvm_mac_hosts_update_result
 
     - name: Verify Mac hosts entries were written
@@ -299,11 +417,23 @@
           - --
           - "{{ item.value.ansible_host }} {{ item.key }}"
           - /etc/hosts
-      loop: "{{ hostvars['localhost']['kvm_selected_guest_hostvars'] | dict2items }}"
+      loop: >-
+        {{
+          hostvars['localhost']['kvm_selected_guest_hostvars']
+          | dict2items
+          | rejectattr(
+              'key',
+              'in',
+              hostvars['localhost']['kvm_remote_failed_guest_hostnames'] | default([])
+            )
+          | list
+        }}
       register: kvm_mac_hosts_verification
       changed_when: false
       failed_when: false
-      when: hostvars['localhost']['kvm_wrapper_action'] == 'create'
+      when:
+        - hostvars['localhost']['kvm_wrapper_action'] == 'create'
+        - not (kvm_skip_mac_hosts_file | default(false) | bool)
 
     - name: Require selected guest entries in Mac hosts file
       ansible.builtin.assert:
@@ -313,16 +443,31 @@
           Expected /etc/hosts to contain '{{ item.item.value.ansible_host }} {{ item.item.key }}',
           but it was not found after the update task. Check the task output and Mac sudo privileges.
       loop: "{{ kvm_mac_hosts_verification.results | default([]) }}"
-      when: hostvars['localhost']['kvm_wrapper_action'] == 'create'
+      when:
+        - hostvars['localhost']['kvm_wrapper_action'] == 'create'
+        - not (kvm_skip_mac_hosts_file | default(false) | bool)
 
     - name: Report Mac hosts file updates
       ansible.builtin.debug:
         msg: >-
           Verified /etc/hosts entries for
-          {{ hostvars['localhost']['kvm_selected_guest_hostvars'].keys() | list | join(', ') }}.
+          {{
+            hostvars['localhost']['kvm_selected_guest_hostvars']
+            | dict2items
+            | rejectattr(
+                'key',
+                'in',
+                hostvars['localhost']['kvm_remote_failed_guest_hostnames'] | default([])
+              )
+            | map(attribute='key')
+            | list
+            | join(', ')
+          }}.
           Update task results: {{ kvm_mac_hosts_update_result.results
             | map(attribute='changed') | list }}.
-      when: hostvars['localhost']['kvm_wrapper_action'] == 'create'
+      when:
+        - hostvars['localhost']['kvm_wrapper_action'] == 'create'
+        - not (kvm_skip_mac_hosts_file | default(false) | bool)
 
 - name: Remove deleted VMs from the Ubuntu and Mac hosts files
   hosts: localhost

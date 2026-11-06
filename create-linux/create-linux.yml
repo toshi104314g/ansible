@@ -14,15 +14,38 @@
           - ansible_inventory_sources | length == 1
         fail_msg: "Specify exactly one unified Linux inventory with -i."
 
+    - name: Resolve the unified Linux inventory path
+      ansible.builtin.command:
+        argv:
+          - realpath
+          - "{{ ansible_inventory_sources | first }}"
+      register: unified_linux_inventory_realpath
+      changed_when: false
+      check_mode: false
+
+    - name: Resolve the home directory of the invoking user
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - >-
+            import os, pwd;
+            user = os.environ.get('SUDO_USER');
+            print(pwd.getpwnam(user).pw_dir if user else os.path.expanduser('~'))
+      register: unified_linux_invoking_user_home
+      changed_when: false
+      check_mode: false
+
     - name: Parse the unified Linux inventory
       ansible.builtin.command:
         argv:
           - ansible-inventory
           - --inventory
-          - "{{ ansible_inventory_sources | first }}"
+          - "{{ unified_linux_inventory_realpath.stdout }}"
           - --list
       register: unified_linux_inventory_result
       changed_when: false
+      check_mode: false
 
     - name: Record UTM and KVM hosts from the unified inventory
       ansible.builtin.set_fact:
@@ -73,8 +96,256 @@
             == (unified_linux_inventory_hostvars | length)
         fail_msg: "Every UTM and KVM guest must have a unique ansible_host IPv4 address."
 
-- name: Provision Linux guests on UTM
-  ansible.builtin.import_playbook: ../create-linux-utm/create-linux-utm.yml
+- name: Provision UTM and KVM guests in parallel
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  tags:
+    - create
 
-- name: Provision Linux guests on KVM
-  ansible.builtin.import_playbook: ../create-linux-kvm-remote/create-linux-kvm-remote.yml
+  vars:
+    unified_linux_playbook: "{{ lookup('pipe', 'command -v ansible-playbook') }}"
+    unified_linux_inventory: "{{ hostvars['localhost']['unified_linux_inventory_realpath'].stdout }}"
+    unified_linux_home: "{{ lookup('env', 'HOME') }}"
+    unified_linux_path: "{{ lookup('env', 'PATH') }}"
+    unified_linux_create_commands:
+      - name: utm
+        argv:
+          - "{{ unified_linux_playbook }}"
+          - --inventory
+          - "{{ unified_linux_inventory }}"
+          - "{{ playbook_dir }}/../create-linux-utm/create-linux-utm.yml"
+          - --tags
+          - create
+          - --skip-tags
+          - hosts_file
+      - name: kvm
+        argv:
+          - "{{ unified_linux_playbook }}"
+          - --inventory
+          - "{{ unified_linux_inventory }}"
+          - "{{ playbook_dir }}/../create-linux-kvm-remote/create-linux-kvm-remote.yml"
+          - --tags
+          - create
+          - --skip-tags
+          - hosts_file
+          - --extra-vars
+          - "{{ {'kvm_skip_mac_hosts_file': true} | to_json }}"
+
+  tasks:
+    - name: Create a private workspace for backend output
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: ansible-linux-backends-
+      register: unified_linux_backend_workspace
+
+    - name: Run UTM and KVM provisioning concurrently and collect both exit codes
+      ansible.builtin.shell:
+        cmd: |
+          {{ unified_linux_create_commands[0].argv | map('quote') | join(' ') }} \
+            > {{ (unified_linux_backend_workspace.path ~ '/utm.log') | quote }} 2>&1 &
+          utm_pid=$!
+          {{ unified_linux_create_commands[1].argv | map('quote') | join(' ') }} \
+            > {{ (unified_linux_backend_workspace.path ~ '/kvm.log') | quote }} 2>&1 &
+          kvm_pid=$!
+
+          wait "$utm_pid"
+          utm_rc=$?
+          wait "$kvm_pid"
+          kvm_rc=$?
+
+          printf '%s\n' "$utm_rc" > {{ (unified_linux_backend_workspace.path ~ '/utm.rc') | quote }}
+          printf '%s\n' "$kvm_rc" > {{ (unified_linux_backend_workspace.path ~ '/kvm.rc') | quote }}
+          exit 0
+      changed_when: true
+      environment:
+        HOME: "{{ unified_linux_invoking_user_home.stdout }}"
+        PATH: "{{ unified_linux_path }}"
+
+    - name: Read UTM and KVM provisioning exit codes
+      ansible.builtin.command:
+        argv:
+          - cat
+          - "{{ unified_linux_backend_workspace.path }}/{{ item.name }}.rc"
+      loop: "{{ unified_linux_create_commands }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: unified_linux_backend_exit_codes
+      changed_when: false
+
+    - name: Read UTM and KVM provisioning output
+      ansible.builtin.command:
+        argv:
+          - cat
+          - "{{ unified_linux_backend_workspace.path }}/{{ item.name }}.log"
+      loop: "{{ unified_linux_create_commands }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: unified_linux_backend_output
+      changed_when: false
+
+    - name: Build UTM and KVM provisioning results
+      ansible.builtin.set_fact:
+        unified_linux_child_results: >-
+          {{
+            unified_linux_child_results | default({})
+            | combine({
+                item.item.name: {
+                  'rc': item.stdout | trim | int,
+                  'stdout': (
+                    unified_linux_backend_output.results
+                    | selectattr('item.name', 'equalto', item.item.name)
+                    | map(attribute='stdout')
+                    | first
+                  ),
+                  'finished': true
+                }
+              })
+          }}
+      loop: "{{ unified_linux_backend_exit_codes.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Record UTM and KVM guests that failed provisioning
+      ansible.builtin.set_fact:
+        unified_linux_failed_utm_hosts: >-
+          {{
+            unified_linux_utm_hosts.keys() | list
+            if unified_linux_child_results.utm.rc | default(1) | int != 0
+            else unified_linux_child_results.utm.stdout | default('')
+              | regex_findall('UTM_SKIPPED_GUEST: ([A-Za-z0-9_.-]+)')
+              | unique | list
+          }}
+        unified_linux_failed_kvm_hosts: >-
+          {{
+            unified_linux_kvm_hosts.keys() | list
+            if unified_linux_child_results.kvm.rc | default(1) | int != 0
+            else unified_linux_child_results.kvm.stdout | default('')
+              | regex_findall('KVM_SKIPPED_GUEST: ([A-Za-z0-9_.-]+)')
+              | unique | list
+          }}
+
+    - name: Update Mac hosts entries for successfully provisioned guests
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^[ \t]*\S+[ \t]+{{ item.key | regex_escape }}([ \t].*)?$'
+        line: "{{ item.value.ansible_host }} {{ item.key }}"
+      loop: >-
+        {{
+          unified_linux_inventory_hostvars
+          | dict2items
+          | rejectattr(
+              'key',
+              'in',
+              (unified_linux_failed_utm_hosts | default([]))
+              + (unified_linux_failed_kvm_hosts | default([]))
+            )
+          | list
+        }}
+      tags:
+        - hosts_file
+
+    - name: Report UTM and KVM provisioning results
+      ansible.builtin.debug:
+        msg: "{{ item.key }} backend result: {{ item.value | to_nice_json }}"
+      loop: "{{ unified_linux_child_results | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Remove the backend output workspace
+      ansible.builtin.file:
+        path: "{{ unified_linux_backend_workspace.path }}"
+        state: absent
+
+    - name: Require UTM and KVM provisioning to succeed
+      ansible.builtin.assert:
+        that:
+          - unified_linux_child_results.utm.rc is defined
+          - unified_linux_child_results.utm.rc | default(1) | int == 0
+          - unified_linux_child_results.kvm.rc is defined
+          - unified_linux_child_results.kvm.rc | default(1) | int == 0
+        fail_msg: >-
+          One or more backend playbooks failed or did not return an exit code.
+          Inspect the full backend results above.
+
+- name: Delete Linux guests on UTM and KVM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  tags:
+    - delete
+    - never
+
+  vars:
+    unified_linux_playbook: "{{ lookup('pipe', 'command -v ansible-playbook') }}"
+    unified_linux_inventory: "{{ hostvars['localhost']['unified_linux_inventory_realpath'].stdout }}"
+    unified_linux_home: "{{ lookup('env', 'HOME') }}"
+    unified_linux_path: "{{ lookup('env', 'PATH') }}"
+    unified_linux_delete_commands:
+      - name: utm
+        argv:
+          - "{{ unified_linux_playbook }}"
+          - --inventory
+          - "{{ unified_linux_inventory }}"
+          - "{{ playbook_dir }}/../create-linux-utm/create-linux-utm.yml"
+          - --tags
+          - delete,remove_hosts_file
+          - --extra-vars
+          - "{{ {'utm_delete_confirmation_input': 'DELETE'} | to_json }}"
+      - name: kvm
+        argv:
+          - "{{ unified_linux_playbook }}"
+          - --inventory
+          - "{{ unified_linux_inventory }}"
+          - "{{ playbook_dir }}/../create-linux-kvm-remote/create-linux-kvm-remote.yml"
+          - --tags
+          - delete
+          - --extra-vars
+          - "{{ {'kvm_wrapper_delete_confirmation_input': 'DELETE'} | to_json }}"
+
+  tasks:
+    - name: Confirm UTM deletion
+      ansible.builtin.pause:
+        prompt: "This permanently deletes selected UTM VMs. Type DELETE to continue"
+      register: unified_utm_delete_confirmation
+      when: utm_delete_confirmation_input | default('') != 'DELETE'
+
+    - name: Require UTM deletion confirmation
+      ansible.builtin.assert:
+        that:
+          - >-
+            (utm_delete_confirmation_input | default('') == 'DELETE')
+            or unified_utm_delete_confirmation.user_input | default('') == 'DELETE'
+        fail_msg: "UTM deletion cancelled. The required confirmation is DELETE."
+
+    - name: Confirm KVM deletion
+      ansible.builtin.pause:
+        prompt: "This permanently deletes selected KVM VMs. Type DELETE to continue"
+      register: unified_kvm_delete_confirmation
+      when: kvm_wrapper_delete_confirmation_input | default('') != 'DELETE'
+
+    - name: Require KVM deletion confirmation
+      ansible.builtin.assert:
+        that:
+          - >-
+            (kvm_wrapper_delete_confirmation_input | default('') == 'DELETE')
+            or unified_kvm_delete_confirmation.user_input | default('') == 'DELETE'
+        fail_msg: "KVM deletion cancelled. The required confirmation is DELETE."
+
+    - name: Delete selected UTM guests
+      ansible.builtin.command:
+        argv: "{{ unified_linux_delete_commands[0].argv }}"
+      changed_when: true
+      environment:
+        HOME: "{{ unified_linux_invoking_user_home.stdout }}"
+        PATH: "{{ unified_linux_path }}"
+
+    - name: Delete selected KVM guests
+      ansible.builtin.command:
+        argv: "{{ unified_linux_delete_commands[1].argv }}"
+      changed_when: true
+      environment:
+        HOME: "{{ unified_linux_home }}"
+        PATH: "{{ unified_linux_path }}"

@@ -90,6 +90,34 @@
   when: item.rc != 0
   changed_when: true
 
+- name: Ensure Rocky clone hostnames match the inventory
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "root@{{ utm_vm_ipv6[item.name] }}"
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -e
+      if [ "$(hostname)" != {{ item.hostname | quote }} ]; then
+        hostnamectl set-hostname {{ item.hostname | quote }}
+        echo changed
+      fi
+  register: utm_rocky_hostname_updates
+  changed_when: "'changed' in utm_rocky_hostname_updates.stdout"
+  loop: "{{ utm_clone_vms | selectattr('os', 'equalto', 'rocky9') | list }}"
+
 - name: Verify Rocky clone hostnames
   ansible.builtin.command:
     argv:

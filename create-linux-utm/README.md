@@ -6,8 +6,11 @@ Each inventory host selects its operating system and UTM template with `utm_os` 
 
 Supported `utm_os` values:
 
-- `rocky9`: SSH as `root`; configures static IPv4 with NetworkManager while retaining IPv6 SLAAC.
-- `ubuntu26`: SSH as `toshiyuki` with passwordless `sudo -n`; configures static IPv4 with Netplan while retaining IPv6 SLAAC.
+- `rocky9`: provisions through root, then configures the shared `ansible-user` account with passwordless sudo; configures static IPv4 with NetworkManager while retaining IPv6 SLAAC.
+- `ubuntu26`: provisions through the template's `toshiyuki` account, then configures the same `ansible-user` account and public key; configures static IPv4 with Netplan while retaining IPv6 SLAAC.
+
+Both guest OSes use the public key matching the existing `~/.ssh/id_ed25519` provisioning key. Set `ansible_user: ansible-user` and `ansible_ssh_private_key_file: ~/.ssh/id_ed25519` in the inventory for subsequent Ansible commands.
+The existing-guest configuration path also adds this account using its current OS-specific SSH account as a one-time bootstrap.
 
 The following network settings are inherited from the inventory's `all.vars` or the host's groups: `utm_network_connection`, `utm_global_ipv6_prefix`, `utm_ipv4_prefix_length`, `utm_ipv4_gateway`, and `utm_ipv4_dns_servers`. `utm_provision` may be set per host or inherited from a group and must be `clone` or `existing`. Existing guests additionally require `utm_ssh_alias`.
 
@@ -46,3 +49,7 @@ Before cloning, each selected template must already exist in UTM and be stopped.
 Deletion protects every `utm_template_name` specified by the inventory. The `remove_hosts_file` tag controls only removal of `/etc/hosts` entries and is independent of the VM deletion confirmation.
 
 For non-interactive deletion, explicitly confirm with `-e utm_delete_confirmation_input=DELETE`; otherwise the playbook prompts for `DELETE`.
+
+During creation, UTM clones are provisioned concurrently, each as an independent inventory host. Ansible's `forks` setting limits the number running at once; use `-f` to override it for a run (for example, `-f 8`). Each guest uses a separate SSH known-hosts file during provisioning to avoid concurrent writes to the shared file.
+
+A guest is skipped with a warning if its UTM VM name differs from its inventory hostname, or if its current guest hostname is neither the inventory hostname nor a clean template default. Other UTM guests continue provisioning. A guest that fails another provisioning task is also reported as skipped, and is excluded from the hosts-file update.

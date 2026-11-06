@@ -36,7 +36,7 @@
       - StrictHostKeyChecking=accept-new
       - -o
       - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
-      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
+      - "{{ item.bootstrap_user }}@{{ item.ipv4_address }}"
       - /usr/bin/true
   register: kvm_existing_ssh_check
   changed_when: false
@@ -144,7 +144,7 @@
       - StrictHostKeyChecking=accept-new
       - -o
       - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
-      - "{{ item.ssh_user }}@{{ item.ipv4_address }}"
+      - "{{ item.bootstrap_user }}@{{ item.ipv4_address }}"
       - /usr/bin/hostname
   register: kvm_existing_hostname
   changed_when: false
@@ -158,6 +158,13 @@
       KVM guest '{{ item.item.name }}' has hostname '{{ item.stdout | trim }}',
       expected '{{ item.item.hostname }}'.
   loop: "{{ kvm_existing_hostname.results }}"
+
+- name: Create the common Ansible account on existing KVM guests
+  ansible.builtin.include_tasks: ensure-ansible-user.yml
+  loop: "{{ kvm_existing_vms }}"
+  loop_control:
+    loop_var: kvm_existing_vm
+    label: "{{ kvm_existing_vm.name }}"
 
 - name: Install the optional additional SSH public key on existing guests
   ansible.builtin.command:

@@ -69,10 +69,3 @@
 - name: Record registered libvirt domain names
   ansible.builtin.set_fact:
     kvm_domain_names: "{{ kvm_domain_list.stdout_lines | reject('equalto', '') | list }}"
-
-- name: Refuse a VM name that collides with a template image name
-  ansible.builtin.assert:
-    that:
-      - item.name != item.template_image
-    fail_msg: "KVM domain '{{ item.name }}' must not use the template image name."
-  loop: "{{ kvm_clone_vms }}"

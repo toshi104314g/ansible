@@ -1,0 +1,176 @@
+---
+- name: Provision KVM clone {{ kvm_clone_vm.name }}
+  block:
+    - name: Set the active KVM clone
+      ansible.builtin.set_fact:
+        kvm_clone_vms:
+          - "{{ kvm_clone_vm }}"
+        kvm_current_clone_initial_state: absent
+        kvm_current_clone_started_before_error: false
+
+    - name: Require KVM VM name and inventory hostname to match
+      ansible.builtin.assert:
+        that:
+          - kvm_clone_vm.name == kvm_clone_vm.hostname
+          - kvm_clone_vm.name != kvm_clone_vm.template_image
+        fail_msg: >-
+          KVM VM name '{{ kvm_clone_vm.name }}' must match inventory hostname
+          '{{ kvm_clone_vm.hostname }}' and differ from template image
+          '{{ kvm_clone_vm.template_image }}'; this VM will be skipped.
+
+    - name: Check whether the KVM guest IPv4 address conflicts with Ubuntu hosts entries
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../check-hosts-ip.py"
+          - "{{ kvm_clone_vm.ipv4_address }}"
+          - "{{ kvm_clone_vm.hostname }}"
+      register: kvm_hosts_ip_check
+      changed_when: false
+      failed_when: kvm_hosts_ip_check.rc not in [0, 1]
+
+    - name: Refuse to create the KVM guest when its IPv4 address is already assigned
+      ansible.builtin.assert:
+        that:
+          - kvm_hosts_ip_check.rc == 0
+        fail_msg: >-
+          KVM guest '{{ kvm_clone_vm.hostname }}' will be skipped because
+          {{ kvm_clone_vm.ipv4_address }} is assigned to another name in Ubuntu /etc/hosts:
+          {{ kvm_hosts_ip_check.stdout | trim }}.
+
+    - name: Read initial state of an existing KVM clone
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - domstate
+          - "{{ kvm_clone_vm.name }}"
+      register: kvm_current_clone_initial_state_result
+      changed_when: false
+      failed_when: kvm_current_clone_initial_state_result.rc not in [0, 1]
+      when: kvm_clone_vm.name in kvm_domain_names
+
+    - name: Record initial state of the KVM clone
+      ansible.builtin.set_fact:
+        kvm_current_clone_initial_state: >-
+          {{
+            kvm_current_clone_initial_state_result.stdout | trim
+            if kvm_clone_vm.name in kvm_domain_names
+            else 'absent'
+          }}
+        kvm_current_clone_started_before_error: >-
+          {{
+            kvm_clone_vm.name not in kvm_domain_names
+            or kvm_current_clone_initial_state_result.stdout | default('') | trim != 'running'
+          }}
+
+    - name: Require the KVM template image to be available
+      ansible.builtin.import_tasks: check-template-images.yml
+
+    - name: Prepare cloud-init data for the KVM clone
+      ansible.builtin.import_tasks: prepare-cloud-init.yml
+
+    - name: Clone and start the KVM guest
+      ansible.builtin.import_tasks: clone-vms.yml
+
+    - name: Check whether the KVM clone's bootstrap account is available
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ kvm_ssh_private_key_file }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - ConnectTimeout=5
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - UserKnownHostsFile=/dev/null
+          - "{{ kvm_clone_vm.bootstrap_user }}@{{ kvm_clone_vm.ipv4_address }}"
+          - /usr/bin/true
+      register: kvm_clone_bootstrap_check
+      changed_when: false
+      failed_when: false
+
+    - name: Bootstrap the shared Ansible account on an existing KVM clone
+      ansible.builtin.include_tasks: ensure-ansible-user.yml
+      vars:
+        kvm_existing_vm: "{{ kvm_clone_vm }}"
+      when: kvm_clone_bootstrap_check.rc == 0
+
+    - name: Verify the KVM guest hostname before other configuration
+      ansible.builtin.import_tasks: verify-clone-hostname.yml
+
+    - name: Verify the KVM guest and configure remaining identities
+      ansible.builtin.import_tasks: verify-guests.yml
+
+  rescue:
+    - name: Check whether failed KVM guest remains registered
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - list
+          - --all
+          - --name
+      register: kvm_failed_clone_domain_list
+      changed_when: false
+      failed_when: false
+
+    - name: Read state of failed KVM guest
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - domstate
+          - "{{ kvm_clone_vm.name }}"
+      register: kvm_failed_clone_state
+      changed_when: false
+      failed_when: false
+      when: kvm_clone_vm.name in (kvm_failed_clone_domain_list.stdout_lines | default([]))
+
+    - name: Stop failed KVM guest that was initially stopped
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - shutdown
+          - "{{ kvm_clone_vm.name }}"
+      register: kvm_failed_clone_stop
+      failed_when: false
+      changed_when: kvm_failed_clone_stop.rc == 0
+      when:
+        - kvm_clone_vm.name in (kvm_failed_clone_domain_list.stdout_lines | default([]))
+        - kvm_current_clone_started_before_error | default(false) | bool
+        - kvm_failed_clone_state.stdout | default('') | trim == 'running'
+
+    - name: Warn if a failed KVM guest could not be stopped
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: Failed to stop KVM guest '{{ kvm_clone_vm.name }}' after
+          provisioning failed: {{ kvm_failed_clone_stop.stderr | default('unknown error') }}.
+      when:
+        - kvm_failed_clone_stop is defined
+        - kvm_failed_clone_stop.rc | default(0) | int != 0
+
+    - name: Record the skipped KVM clone
+      ansible.builtin.set_fact:
+        kvm_failed_clone_hostnames: >-
+          {{
+            (kvm_failed_clone_hostnames | default([]))
+            + [kvm_clone_vm.inventory_hostname]
+          }}
+
+    - name: Warn that this KVM clone was skipped
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: KVM_SKIPPED_GUEST: {{ kvm_clone_vm.inventory_hostname }}.
+          Skipping KVM guest '{{ kvm_clone_vm.name }}'.
+          Failed task: {{ ansible_failed_task.name | default('unknown task') }}.
+          {{ ansible_failed_result.msg
+             | default(ansible_failed_result.stderr | default('No error details were returned.')) }}
