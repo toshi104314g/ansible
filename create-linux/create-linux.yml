@@ -47,35 +47,98 @@
       changed_when: false
       check_mode: false
 
-    - name: Record UTM and KVM hosts from the unified inventory
+    - name: Record the unified inventory hosts and requested hostname
       ansible.builtin.set_fact:
         unified_linux_inventory_hostvars: >-
           {{ (unified_linux_inventory_result.stdout | from_json)['_meta']['hostvars'] }}
+        unified_linux_requested_hostnames_raw: "{{ hostname | default('') | string | trim }}"
+        unified_linux_requested_hostnames: >-
+          {{
+            hostname.split(',')
+            | map('trim')
+            | list
+            if hostname is defined and (hostname | string | trim | length > 0)
+            else []
+          }}
+
+    - name: Select inventory hosts requested for this run
+      ansible.builtin.set_fact:
+        unified_linux_selected_hostvars: >-
+          {{
+            unified_linux_inventory_hostvars
+            | dict2items
+            | selectattr('key', 'in', unified_linux_requested_hostnames)
+            | items2dict
+            if unified_linux_requested_hostnames_raw | length > 0
+            else unified_linux_inventory_hostvars
+          }}
+
+    - name: Record selected UTM and KVM hosts
+      ansible.builtin.set_fact:
         unified_linux_utm_hosts: >-
           {{
-            (unified_linux_inventory_result.stdout | from_json)['_meta']['hostvars']
+            unified_linux_selected_hostvars
             | dict2items
             | selectattr('value.utm_vm_name', 'defined')
             | items2dict
           }}
         unified_linux_kvm_hosts: >-
           {{
-            (unified_linux_inventory_result.stdout | from_json)['_meta']['hostvars']
+            unified_linux_selected_hostvars
             | dict2items
             | selectattr('value.kvm_vm_name', 'defined')
             | items2dict
           }}
 
-    - name: Require UTM and KVM guests in the unified inventory
+    - name: Validate the requested hostname list
+      ansible.builtin.assert:
+        that:
+          - >-
+            unified_linux_requested_hostnames_raw | length == 0
+            or unified_linux_requested_hostnames | length > 0
+          - >-
+            unified_linux_requested_hostnames_raw | length == 0
+            or '' not in unified_linux_requested_hostnames
+          - >-
+            unified_linux_requested_hostnames | unique | length
+            == unified_linux_requested_hostnames | length
+        fail_msg: >-
+          Provide a comma-separated list of non-empty, unique inventory hostnames.
+
+    - name: Require all requested hosts to exist in the inventory
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              unified_linux_requested_hostnames
+              | difference(unified_linux_inventory_hostvars.keys() | list)
+              | length
+            ) == 0
+        fail_msg: >-
+          Inventory hosts not found:
+          {{
+            unified_linux_requested_hostnames
+            | difference(unified_linux_inventory_hostvars.keys() | list)
+            | join(', ')
+          }}.
+
+    - name: Require at least one host in the unified inventory
+      ansible.builtin.assert:
+        that:
+          - unified_linux_selected_hostvars | length > 0
+        fail_msg: "The unified inventory contains no hosts."
+
+    - name: Require both backends when no specific host was requested
       ansible.builtin.assert:
         that:
           - unified_linux_utm_hosts | length > 0
           - unified_linux_kvm_hosts | length > 0
         fail_msg: >-
-          The unified inventory must include at least one UTM guest
-          (utm_vm_name) and one KVM guest (kvm_vm_name).
+          Without -e hostname=..., the unified inventory must include at least
+          one UTM guest (utm_vm_name) and one KVM guest (kvm_vm_name).
+      when: unified_linux_requested_hostnames_raw | length == 0
 
-    - name: Require each inventory host to belong to exactly one backend
+    - name: Require each selected host to belong to exactly one backend
       ansible.builtin.assert:
         that:
           - >-
@@ -85,16 +148,32 @@
         fail_msg: >-
           Inventory host '{{ item.key }}' must define ansible_host and exactly
           one of utm_vm_name or kvm_vm_name.
-      loop: "{{ unified_linux_inventory_hostvars | dict2items }}"
+      loop: "{{ unified_linux_selected_hostvars | dict2items }}"
 
-    - name: Require unique IPv4 addresses across all UTM and KVM guests
+    - name: Require unique IPv4 addresses among selected guests
       ansible.builtin.assert:
         that:
           - >-
-            (unified_linux_inventory_hostvars.values()
+            (unified_linux_selected_hostvars.values()
             | map(attribute='ansible_host') | list | unique | length)
-            == (unified_linux_inventory_hostvars | length)
+            == (unified_linux_selected_hostvars | length)
         fail_msg: "Every UTM and KVM guest must have a unique ansible_host IPv4 address."
+
+    - name: Create a private workspace for the selected inventory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: ansible-linux-inventory-
+      register: unified_linux_inventory_workspace
+
+    - name: Write the selected hosts to a temporary inventory
+      ansible.builtin.copy:
+        content: "{{ {'all': {'hosts': unified_linux_selected_hostvars}} | to_nice_yaml }}"
+        dest: "{{ unified_linux_inventory_workspace.path }}/inventory.yml"
+        mode: "0600"
+
+    - name: Record the selected inventory path
+      ansible.builtin.set_fact:
+        unified_linux_selected_inventory: "{{ unified_linux_inventory_workspace.path }}/inventory.yml"
 
 - name: Provision UTM and KVM guests in parallel
   hosts: localhost
@@ -106,7 +185,7 @@
 
   vars:
     unified_linux_playbook: "{{ lookup('pipe', 'command -v ansible-playbook') }}"
-    unified_linux_inventory: "{{ hostvars['localhost']['unified_linux_inventory_realpath'].stdout }}"
+    unified_linux_inventory: "{{ hostvars['localhost']['unified_linux_selected_inventory'] }}"
     unified_linux_home: "{{ lookup('env', 'HOME') }}"
     unified_linux_path: "{{ lookup('env', 'PATH') }}"
     unified_linux_create_commands:
@@ -143,17 +222,35 @@
     - name: Run UTM and KVM provisioning concurrently and collect both exit codes
       ansible.builtin.shell:
         cmd: |
+          {% if unified_linux_utm_hosts | length > 0 %}
           {{ unified_linux_create_commands[0].argv | map('quote') | join(' ') }} \
             > {{ (unified_linux_backend_workspace.path ~ '/utm.log') | quote }} 2>&1 &
           utm_pid=$!
+          {% else %}
+          printf '%s\n' 'UTM backend not selected' > {{ (unified_linux_backend_workspace.path ~ '/utm.log') | quote }}
+          utm_pid=
+          {% endif %}
+          {% if unified_linux_kvm_hosts | length > 0 %}
           {{ unified_linux_create_commands[1].argv | map('quote') | join(' ') }} \
             > {{ (unified_linux_backend_workspace.path ~ '/kvm.log') | quote }} 2>&1 &
           kvm_pid=$!
+          {% else %}
+          printf '%s\n' 'KVM backend not selected' > {{ (unified_linux_backend_workspace.path ~ '/kvm.log') | quote }}
+          kvm_pid=
+          {% endif %}
 
-          wait "$utm_pid"
-          utm_rc=$?
-          wait "$kvm_pid"
-          kvm_rc=$?
+          if [ -n "$utm_pid" ]; then
+            wait "$utm_pid"
+            utm_rc=$?
+          else
+            utm_rc=0
+          fi
+          if [ -n "$kvm_pid" ]; then
+            wait "$kvm_pid"
+            kvm_rc=$?
+          else
+            kvm_rc=0
+          fi
 
           printf '%s\n' "$utm_rc" > {{ (unified_linux_backend_workspace.path ~ '/utm.rc') | quote }}
           printf '%s\n' "$kvm_rc" > {{ (unified_linux_backend_workspace.path ~ '/kvm.rc') | quote }}
@@ -233,7 +330,7 @@
         line: "{{ item.value.ansible_host }} {{ item.key }}"
       loop: >-
         {{
-          unified_linux_inventory_hostvars
+          unified_linux_selected_hostvars
           | dict2items
           | rejectattr(
               'key',
@@ -258,6 +355,11 @@
         path: "{{ unified_linux_backend_workspace.path }}"
         state: absent
 
+    - name: Remove the selected inventory workspace
+      ansible.builtin.file:
+        path: "{{ hostvars['localhost']['unified_linux_inventory_workspace'].path }}"
+        state: absent
+
     - name: Require UTM and KVM provisioning to succeed
       ansible.builtin.assert:
         that:
@@ -280,7 +382,7 @@
 
   vars:
     unified_linux_playbook: "{{ lookup('pipe', 'command -v ansible-playbook') }}"
-    unified_linux_inventory: "{{ hostvars['localhost']['unified_linux_inventory_realpath'].stdout }}"
+    unified_linux_inventory: "{{ hostvars['localhost']['unified_linux_selected_inventory'] }}"
     unified_linux_home: "{{ lookup('env', 'HOME') }}"
     unified_linux_path: "{{ lookup('env', 'PATH') }}"
     unified_linux_delete_commands:
@@ -310,7 +412,9 @@
       ansible.builtin.pause:
         prompt: "This permanently deletes selected UTM VMs. Type DELETE to continue"
       register: unified_utm_delete_confirmation
-      when: utm_delete_confirmation_input | default('') != 'DELETE'
+      when:
+        - hostvars['localhost']['unified_linux_utm_hosts'] | length > 0
+        - utm_delete_confirmation_input | default('') != 'DELETE'
 
     - name: Require UTM deletion confirmation
       ansible.builtin.assert:
@@ -319,12 +423,15 @@
             (utm_delete_confirmation_input | default('') == 'DELETE')
             or unified_utm_delete_confirmation.user_input | default('') == 'DELETE'
         fail_msg: "UTM deletion cancelled. The required confirmation is DELETE."
+      when: hostvars['localhost']['unified_linux_utm_hosts'] | length > 0
 
     - name: Confirm KVM deletion
       ansible.builtin.pause:
         prompt: "This permanently deletes selected KVM VMs. Type DELETE to continue"
       register: unified_kvm_delete_confirmation
-      when: kvm_wrapper_delete_confirmation_input | default('') != 'DELETE'
+      when:
+        - hostvars['localhost']['unified_linux_kvm_hosts'] | length > 0
+        - kvm_wrapper_delete_confirmation_input | default('') != 'DELETE'
 
     - name: Require KVM deletion confirmation
       ansible.builtin.assert:
@@ -333,11 +440,13 @@
             (kvm_wrapper_delete_confirmation_input | default('') == 'DELETE')
             or unified_kvm_delete_confirmation.user_input | default('') == 'DELETE'
         fail_msg: "KVM deletion cancelled. The required confirmation is DELETE."
+      when: hostvars['localhost']['unified_linux_kvm_hosts'] | length > 0
 
     - name: Delete selected UTM guests
       ansible.builtin.command:
         argv: "{{ unified_linux_delete_commands[0].argv }}"
       changed_when: true
+      when: hostvars['localhost']['unified_linux_utm_hosts'] | length > 0
       environment:
         HOME: "{{ unified_linux_invoking_user_home.stdout }}"
         PATH: "{{ unified_linux_path }}"
@@ -346,6 +455,12 @@
       ansible.builtin.command:
         argv: "{{ unified_linux_delete_commands[1].argv }}"
       changed_when: true
+      when: hostvars['localhost']['unified_linux_kvm_hosts'] | length > 0
       environment:
         HOME: "{{ unified_linux_home }}"
         PATH: "{{ unified_linux_path }}"
+
+    - name: Remove the selected inventory workspace after deletion
+      ansible.builtin.file:
+        path: "{{ hostvars['localhost']['unified_linux_inventory_workspace'].path }}"
+        state: absent

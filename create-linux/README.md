@@ -13,6 +13,20 @@ PATH="/opt/homebrew/bin:$PATH" ansible-playbook \
   create-linux/create-linux.yml \
   -b -K
 
+# Create/configure only the inventory host named files1
+PATH="/opt/homebrew/bin:$PATH" ansible-playbook \
+  -i inventory/inventory_linux.yml \
+  create-linux/create-linux.yml \
+  -e hostname=files1 \
+  -b -K
+
+# Create/configure multiple inventory hosts
+PATH="/opt/homebrew/bin:$PATH" ansible-playbook \
+  -i inventory/inventory_linux.yml \
+  create-linux/create-linux.yml \
+  -e hostname=files1,ldap1 \
+  -b -K
+
 # Delete all selected UTM and KVM guests
 PATH="/opt/homebrew/bin:$PATH" ansible-playbook \
   -i inventory/inventory_linux.yml \
@@ -20,6 +34,8 @@ PATH="/opt/homebrew/bin:$PATH" ansible-playbook \
   --tags delete \
   -b -K
 ```
+
+`-e hostname=<inventory_hostname>[,<inventory_hostname>...]` limits creation, deletion, and hosts-file updates to the listed inventory hosts. Separate names with commas; spaces around names are ignored. Every name must exist in the inventory and be unique. If omitted, the full inventory is used as before.
 
 Deletion asks for `DELETE` in each backend workflow before removing its guests. For non-interactive deletion, provide both `-e utm_delete_confirmation_input=DELETE` and `-e kvm_wrapper_delete_confirmation_input=DELETE`. On KVM, Mac `/etc/hosts` entries are removed by default; Ubuntu KVM controller entries are changed only when `ubuntu_hosts_file` is also selected. UTM guests update the Mac `/etc/hosts` file as part of the UTM workflow. The `-b -K` options provide the Mac sudo password for these hosts-file changes.
 
