@@ -73,11 +73,47 @@
       - item.value.kvm_ipv4_gateway is defined
       - item.value.kvm_ipv4_dns_servers is defined
       - item.value.kvm_ipv4_dns_servers | length > 0
+      - >-
+        item.value.lab_ipv4_address is not defined
+        or (
+          item.value.lab_ipv4_address is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+          and item.value.lab_ipv4_address.split('.') | map('int') | select('gt', 255) | list | length == 0
+          and item.value.lab_ipv4_address.split('.')[-1] | int > 1
+          and item.value.lab_ipv4_address.split('.')[-1] | int < 255
+        )
+      - >-
+        item.value.dmz_ipv4_address is not defined
+        or (
+          item.value.dmz_ipv4_address is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+          and item.value.dmz_ipv4_address.split('.') | map('int') | select('gt', 255) | list | length == 0
+          and item.value.dmz_ipv4_address.split('.')[-1] | int > 1
+          and item.value.dmz_ipv4_address.split('.')[-1] | int < 255
+        )
+      - >-
+        item.value.lab_ipv4_address is not defined
+        or item.value.dmz_ipv4_address is not defined
+        or item.value.lab_ipv4_address != item.value.dmz_ipv4_address
+      - >-
+        item.value.kvm_bridge_name is not defined
+        or item.value.lab_ipv4_address is not defined
+        or item.value.kvm_bridge_name != kvm_lab_bridge_name
+      - >-
+        item.value.kvm_bridge_name is not defined
+        or item.value.dmz_ipv4_address is not defined
+        or item.value.kvm_bridge_name != kvm_dmz_bridge_name
+      - >-
+        (
+          item.value.lab_ipv4_address is not defined
+          and item.value.dmz_ipv4_address is not defined
+        )
+        or item.value.kvm_ipv4_gateway == '192.168.10.1'
     fail_msg: >-
       Host '{{ item.key }}' must specify kvm_os (rocky9 or ubuntu26),
       kvm_template_image, kvm_vm_name, kvm_provision, ansible_host,
       exactly one of kvm_network_name or kvm_bridge_name, kvm_storage_pool,
-      and IPv4 network settings.
+      and IPv4 network settings. Optional lab_ipv4_address and dmz_ipv4_address
+      values must be usable host addresses. Hosts using either network must
+      retain 192.168.10.1 as their management default gateway.
   loop: "{{ kvm_inventory_hostvars | dict2items }}"
 
 - name: Require unique VM names and IPv4 addresses
@@ -196,8 +232,22 @@
           'prefix_length': item.value.kvm_ipv4_prefix_length,
           'gateway': item.value.kvm_ipv4_gateway,
           'dns_servers': item.value.kvm_ipv4_dns_servers,
+          'lab_ipv4_address': item.value.lab_ipv4_address | default(''),
+          'dmz_ipv4_address': item.value.dmz_ipv4_address | default(''),
           'memory_mb': item.value.kvm_memory_mb | default(kvm_default_memory_mb),
-          'vcpus': item.value.kvm_vcpus | default(kvm_default_vcpus)
+          'vcpus': item.value.kvm_vcpus | default(kvm_default_vcpus),
+          'additional_bridge_names':
+            (
+              [kvm_lab_bridge_name]
+              if item.value.lab_ipv4_address is defined
+              else []
+            )
+            +
+            (
+              [kvm_dmz_bridge_name]
+              if item.value.dmz_ipv4_address is defined
+              else []
+            )
         }] if item.value.kvm_provision == 'clone' else [])
       }}
     kvm_existing_vms: >-
@@ -214,7 +264,21 @@
           'bridge_name': item.value.kvm_bridge_name | default(''),
           'prefix_length': item.value.kvm_ipv4_prefix_length,
           'gateway': item.value.kvm_ipv4_gateway,
-          'dns_servers': item.value.kvm_ipv4_dns_servers
+          'dns_servers': item.value.kvm_ipv4_dns_servers,
+          'lab_ipv4_address': item.value.lab_ipv4_address | default(''),
+          'dmz_ipv4_address': item.value.dmz_ipv4_address | default(''),
+          'additional_bridge_names':
+            (
+              [kvm_lab_bridge_name]
+              if item.value.lab_ipv4_address is defined
+              else []
+            )
+            +
+            (
+              [kvm_dmz_bridge_name]
+              if item.value.dmz_ipv4_address is defined
+              else []
+            )
         }] if item.value.kvm_provision == 'existing' else [])
       }}
     kvm_delete_targets: >-
@@ -241,3 +305,13 @@
     kvm_ipv4_prefix_length: "{{ kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_prefix_length') | first }}"
     kvm_ipv4_gateway: "{{ kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_gateway') | first }}"
     kvm_ipv4_dns_servers: "{{ kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_dns_servers') | first }}"
+    kvm_additional_bridge_names: >-
+      {{
+        (
+          (kvm_clone_vms | map(attribute='additional_bridge_names') | flatten | list)
+          +
+          (kvm_existing_vms | map(attribute='additional_bridge_names') | flatten | list)
+        )
+        | unique
+        | list
+      }}

@@ -16,6 +16,8 @@ The following network settings are inherited from the inventory's `all.vars` or 
 
 Before a clone is started, its UTM `config.plist` and UTM's in-memory configuration are updated so the first bridged interface uses Mac `en7`. A LAB address adds a second interface bridged to `vlan0`; a DMZ address adds an interface bridged to `vlan1`. DMZ-only guests therefore use `enp0s2` for DMZ, without a dummy LAB interface. Guests with both addresses use `enp0s2` for LAB and `enp0s3` for DMZ. Running VMs are not modified; if their bridge configuration needs changes, the playbook reports an error instead.
 
+After the management interface is configured, provisioning also configures each optional LAB/DMZ address on its corresponding guest interface. Rocky guests use NetworkManager profiles; Ubuntu guests use Netplan. Both networks may be configured on one guest. Existing UTM guests must already have the corresponding bridged interfaces. The LAB/DMZ interfaces do not install default routes; the management interface retains `utm_ipv4_gateway`, which must be `192.168.10.1` for hosts using either network.
+
 Run commands from the repository root and always select exactly one inventory with `-i`:
 
 ```sh

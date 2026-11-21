@@ -1,0 +1,69 @@
+---
+- name: Read current interfaces for KVM guest {{ kvm_bridge_target_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - domiflist
+      - "{{ kvm_bridge_target_vm.name }}"
+  register: kvm_bridge_target_interfaces
+  changed_when: false
+
+- name: Attach missing lab or DMZ bridges to KVM guest {{ kvm_bridge_target_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - attach-interface
+      - --domain
+      - "{{ kvm_bridge_target_vm.name }}"
+      - --type
+      - bridge
+      - --source
+      - "{{ item }}"
+      - --model
+      - virtio
+      - --live
+      - --config
+  loop: "{{ kvm_bridge_target_vm.additional_bridge_names }}"
+  when: >-
+    item not in (
+      kvm_bridge_target_interfaces.stdout
+      | regex_findall('(?m)^\\s+\\S+\\s+bridge\\s+(\\S+)\\s+')
+    )
+  changed_when: true
+
+- name: Read final interfaces for KVM guest {{ kvm_bridge_target_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - domiflist
+      - "{{ kvm_bridge_target_vm.name }}"
+  register: kvm_bridge_target_final_interfaces
+  changed_when: false
+
+- name: Require requested bridges on KVM guest {{ kvm_bridge_target_vm.name }}
+  ansible.builtin.assert:
+    that:
+      - >-
+        kvm_bridge_target_vm.additional_bridge_names
+        | difference(
+            kvm_bridge_target_final_interfaces.stdout
+            | regex_findall('(?m)^\\s+\\S+\\s+bridge\\s+(\\S+)\\s+')
+          )
+        | length == 0
+    fail_msg: >-
+      KVM guest '{{ kvm_bridge_target_vm.name }}' is missing requested
+      bridge interface(s):
+      {{
+        kvm_bridge_target_vm.additional_bridge_names
+        | difference(
+            kvm_bridge_target_final_interfaces.stdout
+            | regex_findall('(?m)^\\s+\\S+\\s+bridge\\s+(\\S+)\\s+')
+          )
+        | join(', ')
+      }}.

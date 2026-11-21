@@ -50,6 +50,20 @@
         utm_vm_ipv6: "{{ utm_existing_ipv6 }}"
       when: utm_existing_vms | selectattr('os', 'equalto', 'ubuntu26') | list | length > 0
 
+    - name: Configure LAB and DMZ networks on existing UTM guests
+      ansible.builtin.import_tasks: configure-lab-dmz-network.yml
+      vars:
+        utm_clone_vms: "{{ utm_existing_vms }}"
+        utm_vm_ipv6: "{{ utm_existing_ipv6 }}"
+      when: >-
+        utm_existing_vms
+        | selectattr('lab_ipv4_address', 'ne', '')
+        | list | length > 0
+        or
+        utm_existing_vms
+        | selectattr('dmz_ipv4_address', 'ne', '')
+        | list | length > 0
+
     - name: Update Mac hosts entries for inventory virtual machines
       ansible.builtin.import_tasks: update-hosts.yml
       tags:

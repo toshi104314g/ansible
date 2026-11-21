@@ -17,7 +17,8 @@
 
     - name: Check KVM host and libvirt prerequisites
       ansible.builtin.import_tasks: check-prerequisites.yml
-      when: kvm_clone_vms | length > 0
+      when:
+        - (kvm_clone_vms | length > 0) or (kvm_additional_bridge_names | length > 0)
 
     - name: Save all KVM clones before provisioning them individually
       ansible.builtin.set_fact:

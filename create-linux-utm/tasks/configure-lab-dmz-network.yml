@@ -1,0 +1,256 @@
+---
+- name: Require UTM LAB and DMZ interfaces before configuring them
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "{{ utm_secondary_network_vm.ssh_user }}@{{ utm_vm_ipv6[utm_secondary_network_vm.name] }}"
+      - sudo
+      - -n
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -euo pipefail
+      {% if utm_secondary_network_vm.lab_ipv4_address | default('') | length > 0 %}
+      test {{ utm_secondary_network_vm.network_connection | quote }} != enp0s2
+      ip link show dev enp0s2 >/dev/null
+      {% endif %}
+      {% if utm_secondary_network_vm.dmz_ipv4_address | default('') | length > 0 %}
+      test {{ utm_secondary_network_vm.network_connection | quote }} != {{ 'enp0s3' if utm_secondary_network_vm.lab_ipv4_address | default('') | length > 0 else 'enp0s2' }}
+      ip link show dev {{ 'enp0s3' if utm_secondary_network_vm.lab_ipv4_address | default('') | length > 0 else 'enp0s2' }} >/dev/null
+      {% endif %}
+  changed_when: false
+  loop: "{{ utm_clone_vms | selectattr('lab_ipv4_address', 'ne', '') | list + utm_clone_vms | selectattr('dmz_ipv4_address', 'ne', '') | list | unique(attribute='name') }}"
+  loop_control:
+    loop_var: utm_secondary_network_vm
+    label: "{{ utm_secondary_network_vm.name }}"
+
+- name: Configure LAB and DMZ profiles on UTM Rocky guests
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "{{ utm_secondary_network_vm.ssh_user }}@{{ utm_vm_ipv6[utm_secondary_network_vm.name] }}"
+      - sudo
+      - -n
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -euo pipefail
+
+      wait_for_ipv4_address() {
+        local interface=$1
+        local address=$2
+        for attempt in {1..10}; do
+          if ip -4 -o address show dev "$interface" |
+             awk '{print $4}' | grep -Fxq "$address"; then
+            return 0
+          fi
+          sleep 1
+        done
+        return 1
+      }
+
+      configure_profile() {
+        profile=$1
+        interface=$2
+        address=$3
+        changed=0
+
+        if ! nmcli -g NAME connection show | grep -Fxq "$profile"; then
+          active_profile=$(nmcli -g GENERAL.CONNECTION device show "$interface")
+          if [ -n "$active_profile" ] && [ "$active_profile" != "--" ]; then
+            nmcli connection modify "$active_profile" connection.id "$profile"
+          else
+            nmcli connection add type ethernet con-name "$profile" ifname "$interface"
+          fi
+          changed=1
+        fi
+
+        current_gateway=$(nmcli -g ipv4.gateway connection show "$profile")
+        [ "$current_gateway" != "--" ] || current_gateway=
+        current_dns=$(nmcli -g ipv4.dns connection show "$profile")
+        [ "$current_dns" != "--" ] || current_dns=
+        if [ "$(nmcli -g connection.interface-name connection show "$profile")" != "$interface" ] ||
+           [ "$(nmcli -g connection.autoconnect connection show "$profile")" != yes ] ||
+           [ "$(nmcli -g ipv4.method connection show "$profile")" != manual ] ||
+           [ "$(nmcli -g ipv4.addresses connection show "$profile")" != "$address" ] ||
+           [ -n "$current_gateway" ] ||
+           [ -n "$current_dns" ] ||
+           [ "$(nmcli -g ipv4.ignore-auto-dns connection show "$profile")" != yes ] ||
+           [ "$(nmcli -g ipv4.never-default connection show "$profile")" != yes ] ||
+           [ "$(nmcli -g ipv6.method connection show "$profile")" != auto ] ||
+           [ "$(nmcli -g ipv6.never-default connection show "$profile")" != yes ]; then
+          nmcli connection modify "$profile" \
+            connection.interface-name "$interface" \
+            connection.autoconnect yes \
+            ipv4.method manual \
+            ipv4.addresses "$address" \
+            ipv4.gateway "" \
+            ipv4.dns "" \
+            ipv4.ignore-auto-dns yes \
+            ipv4.never-default yes \
+            ipv6.method auto \
+            ipv6.never-default yes
+          changed=1
+        fi
+
+        active_profile=$(nmcli -g GENERAL.CONNECTION device show "$interface")
+        if [ "$active_profile" != "$profile" ]; then
+          if [ -n "$active_profile" ] && [ "$active_profile" != "--" ]; then
+            nmcli connection modify "$active_profile" connection.autoconnect no
+          fi
+          nmcli connection up "$profile" ifname "$interface"
+          changed=1
+        elif [ "$changed" -eq 1 ]; then
+          nmcli device reapply "$interface"
+        fi
+
+        wait_for_ipv4_address "$interface" "$address"
+        if [ "$changed" -eq 1 ]; then
+          echo changed
+        fi
+      }
+
+      management_interface={{ utm_secondary_network_vm.network_connection | quote }}
+      management_profile=$(nmcli -g GENERAL.CONNECTION device show "$management_interface")
+      current_gateway=$(nmcli -g ipv4.gateway connection show "$management_profile")
+      [ "$current_gateway" != "--" ] || current_gateway=
+      if [ "$current_gateway" != 192.168.10.1 ] ||
+         [ "$(nmcli -g ipv4.never-default connection show "$management_profile")" != no ]; then
+        nmcli connection modify "$management_profile" \
+          ipv4.gateway 192.168.10.1 \
+          ipv4.never-default no
+        nmcli device reapply "$management_interface"
+        echo changed
+      fi
+
+      {% if utm_secondary_network_vm.lab_ipv4_address | default('') | length > 0 %}
+      configure_profile lab-net enp0s2 {{ (utm_secondary_network_vm.lab_ipv4_address ~ '/24') | quote }}
+      {% endif %}
+      {% if utm_secondary_network_vm.dmz_ipv4_address | default('') | length > 0 %}
+      configure_profile dmz-net {{ 'enp0s3' if utm_secondary_network_vm.lab_ipv4_address | default('') | length > 0 else 'enp0s2' }} {{ (utm_secondary_network_vm.dmz_ipv4_address ~ '/24') | quote }}
+      {% endif %}
+
+      default_routes=$(ip -4 route show default)
+      [ "$(printf '%s\n' "$default_routes" | wc -l | tr -d ' ')" -eq 1 ]
+      printf '%s\n' "$default_routes" | grep -Fq 'via 192.168.10.1'
+  register: utm_rocky_lab_dmz_result
+  changed_when: "'changed' in utm_rocky_lab_dmz_result.stdout"
+  loop: "{{ utm_clone_vms | selectattr('os', 'equalto', 'rocky9') | selectattr('lab_ipv4_address', 'ne', '') | list + utm_clone_vms | selectattr('os', 'equalto', 'rocky9') | selectattr('dmz_ipv4_address', 'ne', '') | list | unique(attribute='name') }}"
+  loop_control:
+    loop_var: utm_secondary_network_vm
+    label: "{{ utm_secondary_network_vm.name }}"
+
+- name: Configure LAB and DMZ Netplan profiles on UTM Ubuntu guests
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -6
+      - -i
+      - "{{ utm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ utm_ssh_known_hosts_file }}"
+      - "{{ utm_secondary_network_vm.ssh_user }}@{{ utm_vm_ipv6[utm_secondary_network_vm.name] }}"
+      - sudo
+      - -n
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -euo pipefail
+      {% if utm_secondary_network_vm.lab_ipv4_address | default('') | length > 0 %}
+      lab_interface=enp0s2
+      lab_mac=$(cat "/sys/class/net/$lab_interface/address")
+      {% endif %}
+      {% if utm_secondary_network_vm.dmz_ipv4_address | default('') | length > 0 %}
+      dmz_interface={{ 'enp0s3' if utm_secondary_network_vm.lab_ipv4_address | default('') | length > 0 else 'enp0s2' }}
+      dmz_mac=$(cat "/sys/class/net/$dmz_interface/address")
+      {% endif %}
+      netplan_file=/etc/netplan/99-ansible-lab-dmz.yaml
+      temp_file=$(mktemp)
+      trap 'rm -f "$temp_file"' EXIT
+      cat > "$temp_file" <<NETPLAN
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+      {% if utm_secondary_network_vm.lab_ipv4_address | default('') | length > 0 %}
+          lab:
+            match:
+              macaddress: "${lab_mac}"
+            set-name: enp0s2
+            dhcp4: false
+            dhcp6: true
+            accept-ra: true
+            dhcp6-overrides:
+              use-routes: false
+              use-dns: false
+            ra-overrides:
+              use-dns: false
+            addresses:
+              - {{ (utm_secondary_network_vm.lab_ipv4_address ~ '/24') | to_json }}
+      {% endif %}
+      {% if utm_secondary_network_vm.dmz_ipv4_address | default('') | length > 0 %}
+          dmz:
+            match:
+              macaddress: "${dmz_mac}"
+            set-name: {{ 'enp0s3' if utm_secondary_network_vm.lab_ipv4_address | default('') | length > 0 else 'enp0s2' }}
+            dhcp4: false
+            dhcp6: true
+            accept-ra: true
+            dhcp6-overrides:
+              use-routes: false
+              use-dns: false
+            ra-overrides:
+              use-dns: false
+            addresses:
+              - {{ (utm_secondary_network_vm.dmz_ipv4_address ~ '/24') | to_json }}
+      {% endif %}
+      NETPLAN
+      if ! cmp -s "$temp_file" "$netplan_file"; then
+        install -m 600 "$temp_file" "$netplan_file"
+        netplan generate
+        netplan apply
+        echo changed
+      fi
+      default_routes=$(ip -4 route show default)
+      [ "$(printf '%s\n' "$default_routes" | wc -l | tr -d ' ')" -eq 1 ]
+      printf '%s\n' "$default_routes" | grep -Fq 'via 192.168.10.1'
+      {% if utm_secondary_network_vm.lab_ipv4_address | default('') | length > 0 %}
+      ip -4 -o address show dev enp0s2 | awk '{print $4}' | grep -Fxq {{ (utm_secondary_network_vm.lab_ipv4_address ~ '/24') | quote }}
+      {% endif %}
+      {% if utm_secondary_network_vm.dmz_ipv4_address | default('') | length > 0 %}
+      ip -4 -o address show dev {{ 'enp0s3' if utm_secondary_network_vm.lab_ipv4_address | default('') | length > 0 else 'enp0s2' }} | awk '{print $4}' | grep -Fxq {{ (utm_secondary_network_vm.dmz_ipv4_address ~ '/24') | quote }}
+      {% endif %}
+  register: utm_ubuntu_lab_dmz_result
+  changed_when: "'changed' in utm_ubuntu_lab_dmz_result.stdout"
+  loop: "{{ utm_clone_vms | selectattr('os', 'equalto', 'ubuntu26') | selectattr('lab_ipv4_address', 'ne', '') | list + utm_clone_vms | selectattr('os', 'equalto', 'ubuntu26') | selectattr('dmz_ipv4_address', 'ne', '') | list | unique(attribute='name') }}"
+  loop_control:
+    loop_var: utm_secondary_network_vm
+    label: "{{ utm_secondary_network_vm.name }}"

@@ -135,6 +135,12 @@
       ansible.builtin.import_tasks: configure-ubuntu-network.yml
       when: utm_clone_vm.os == 'ubuntu26'
 
+    - name: Configure UTM LAB and DMZ networks
+      ansible.builtin.import_tasks: configure-lab-dmz-network.yml
+      when:
+        - utm_clone_vm.lab_ipv4_address | default('') | length > 0
+          or utm_clone_vm.dmz_ipv4_address | default('') | length > 0
+
   rescue:
     - name: Restore the initial stopped state for a failed existing UTM VM
       ansible.builtin.command:

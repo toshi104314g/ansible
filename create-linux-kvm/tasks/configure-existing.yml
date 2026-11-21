@@ -22,6 +22,14 @@
   loop: "{{ kvm_existing_states.results }}"
   when: item.stdout | trim != 'running'
 
+- name: Ensure requested lab or DMZ bridges are attached to existing KVM guests
+  ansible.builtin.include_tasks: ensure-bridge-interfaces.yml
+  loop: "{{ kvm_existing_vms }}"
+  loop_control:
+    loop_var: kvm_bridge_target_vm
+    label: "{{ kvm_bridge_target_vm.name }}"
+  when: kvm_bridge_target_vm.additional_bridge_names | length > 0
+
 - name: Wait for existing guest SSH access
   ansible.builtin.command:
     argv:
@@ -64,7 +72,9 @@
       - -s
     stdin: |
       set -e
-      interface=$(ip -4 route show default | awk 'NR == 1 { for (i=1; i<=NF; i++) if ($i == "dev") { print $(i+1); exit } }')
+      interface=$(ip -4 -o address show |
+        awk -v address={{ (item.ipv4_address ~ '/' ~ item.prefix_length) | quote }} '$4 == address {print $2; exit}')
+      test -n "$interface"
       connection=$(nmcli -g GENERAL.CONNECTION device show "$interface")
       address={{ (item.ipv4_address ~ '/' ~ item.prefix_length) | quote }}
       gateway={{ item.gateway | quote }}
@@ -73,6 +83,7 @@
         ipv4.method manual \
         ipv4.addresses "$address" \
         ipv4.gateway "$gateway" \
+        ipv4.never-default no \
         ipv4.dns "$dns" \
         ipv4.ignore-auto-dns yes
       nmcli device reapply "$interface"
@@ -193,3 +204,13 @@
   loop: "{{ kvm_existing_vms }}"
   when: kvm_additional_ssh_public_key_file | length > 0
   no_log: true
+
+- name: Configure LAB and DMZ networks on existing KVM guests
+  ansible.builtin.include_tasks: configure-lab-dmz-network.yml
+  loop: "{{ kvm_existing_vms }}"
+  loop_control:
+    loop_var: kvm_secondary_network_vm
+    label: "{{ kvm_secondary_network_vm.name }}"
+  when:
+    - kvm_secondary_network_vm.lab_ipv4_address | default('') | length > 0
+      or kvm_secondary_network_vm.dmz_ipv4_address | default('') | length > 0

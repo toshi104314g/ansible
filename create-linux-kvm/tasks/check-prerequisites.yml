@@ -66,6 +66,26 @@
     or 'UP' not in (kvm_bridge_info.stdout | from_json | first).flags
   when: kvm_network_mode == 'bridge'
 
+- name: Verify each requested LAB or DMZ bridge is active
+  ansible.builtin.command:
+    argv:
+      - ip
+      - -json
+      - -details
+      - link
+      - show
+      - dev
+      - "{{ item }}"
+  register: kvm_additional_bridge_info
+  changed_when: false
+  failed_when: >-
+    kvm_additional_bridge_info.rc != 0
+    or
+    (kvm_additional_bridge_info.stdout | from_json | length != 1)
+    or (kvm_additional_bridge_info.stdout | from_json | first).linkinfo.info_kind != 'bridge'
+    or 'UP' not in (kvm_additional_bridge_info.stdout | from_json | first).flags
+  loop: "{{ kvm_additional_bridge_names }}"
+
 - name: Record registered libvirt domain names
   ansible.builtin.set_fact:
     kvm_domain_names: "{{ kvm_domain_list.stdout_lines | reject('equalto', '') | list }}"

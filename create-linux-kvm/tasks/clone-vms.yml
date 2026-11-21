@@ -27,28 +27,51 @@
 
 - name: Create KVM domains from cloned images
   ansible.builtin.command:
-    argv:
-      - virt-install
-      - --connect
-      - "{{ kvm_connection }}"
-      - --name
-      - "{{ item.name }}"
-      - --memory
-      - "{{ item.memory_mb | string }}"
-      - --vcpus
-      - "{{ item.vcpus | string }}"
-      - --os-variant
-      - generic
-      - --import
-      - --disk
-      - "vol={{ item.storage_pool }}/{{ item.name }}.qcow2,bus=virtio"
-      - --network
-      - "{{ ('bridge=' ~ item.bridge_name) if item.bridge_name else ('network=' ~ item.network_name) }},model=virtio"
-      - --channel
-      - "unix,target.type=virtio,name=org.qemu.guest_agent.0"
-      - --cloud-init
-      - "user-data={{ lookup('env', 'HOME') }}/.cache/ansible-linux-kvm/{{ item.name }}-user-data,meta-data={{ lookup('env', 'HOME') }}/.cache/ansible-linux-kvm/{{ item.name }}-meta-data,network-config={{ lookup('env', 'HOME') }}/.cache/ansible-linux-kvm/{{ item.name }}-network-config"
-      - --noautoconsole
+    argv: >-
+      {{
+        [
+          'virt-install',
+          '--connect',
+          kvm_connection,
+          '--name',
+          item.name,
+          '--memory',
+          item.memory_mb | string,
+          '--vcpus',
+          item.vcpus | string,
+          '--os-variant',
+          'generic',
+          '--import',
+          '--disk',
+          'vol=' ~ item.storage_pool ~ '/' ~ item.name ~ '.qcow2,bus=virtio',
+          '--network',
+          (
+            ('bridge=' ~ item.bridge_name)
+            if item.bridge_name
+            else ('network=' ~ item.network_name)
+          ) ~ ',model=virtio'
+        ]
+        +
+        (
+          ['--network', 'bridge=' ~ item.additional_bridge_names[0] ~ ',model=virtio']
+          if item.additional_bridge_names | length > 0
+          else []
+        )
+        +
+        (
+          ['--network', 'bridge=' ~ item.additional_bridge_names[1] ~ ',model=virtio']
+          if item.additional_bridge_names | length > 1
+          else []
+        )
+        +
+        [
+          '--channel',
+          'unix,target.type=virtio,name=org.qemu.guest_agent.0',
+          '--cloud-init',
+          'user-data=' ~ lookup('env', 'HOME') ~ '/.cache/ansible-linux-kvm/' ~ item.name ~ '-user-data,meta-data=' ~ lookup('env', 'HOME') ~ '/.cache/ansible-linux-kvm/' ~ item.name ~ '-meta-data,network-config=' ~ lookup('env', 'HOME') ~ '/.cache/ansible-linux-kvm/' ~ item.name ~ '-network-config',
+          '--noautoconsole'
+        ]
+      }}
   loop: "{{ kvm_clone_vms }}"
   when: item.name not in kvm_domain_names
 
