@@ -92,6 +92,15 @@ def expected_utm_networks(networks):
     ]
 
 
+def bridged_interfaces(management_host_interface, lab_host_interface=None, dmz_host_interface=None):
+    interfaces = [management_host_interface]
+    if lab_host_interface:
+        interfaces.append(lab_host_interface)
+    if dmz_host_interface:
+        interfaces.append(dmz_host_interface)
+    return interfaces
+
+
 def update_utm_configuration(vm_name, networks, existing_network_count):
     network_records = []
     for index, network in enumerate(networks):
@@ -237,14 +246,24 @@ def main():
     parser.add_argument("vm_name")
     parser.add_argument("--lab", action="store_true", help="inventory has lab_ipv4_address")
     parser.add_argument("--dmz", action="store_true", help="inventory has dmz_ipv4_address")
+    parser.add_argument("--management-host-interface", required=True)
+    parser.add_argument("--lab-host-interface")
+    parser.add_argument("--dmz-host-interface")
     parser.add_argument("--running", action="store_true", help="refuse changes to a running VM")
     args = parser.parse_args()
 
-    bridges = ["en7"]
-    if args.lab:
-        bridges.append("vlan0")
-    if args.dmz:
-        bridges.append("vlan1")
+    if args.lab != bool(args.lab_host_interface):
+        parser.error("--lab and --lab-host-interface must be provided together")
+    if args.dmz != bool(args.dmz_host_interface):
+        parser.error("--dmz and --dmz-host-interface must be provided together")
+    if not args.management_host_interface:
+        parser.error("--management-host-interface must not be empty")
+
+    bridges = bridged_interfaces(
+        args.management_host_interface,
+        args.lab_host_interface,
+        args.dmz_host_interface,
+    )
 
     try:
         changed = configure_networks(

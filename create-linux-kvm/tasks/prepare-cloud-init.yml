@@ -64,9 +64,10 @@
       ethernets:
         {{ 'eth0' if item.os == 'rocky9' else 'ens3' }}:
           renderer: {{ 'NetworkManager' if item.os == 'rocky9' else 'networkd' }}
-          dhcp4: false
+          dhcp4: {{ 'true' if item.private_ipv4_dhcp and not item.temporary_management else 'false' }}
           dhcp6: true
           accept-ra: true
+      {% if item.ipv4_address | length > 0 %}
           addresses:
             - {{ item.ipv4_address }}/{{ item.prefix_length }}
           routes:
@@ -74,4 +75,5 @@
               via: {{ item.gateway }}
           nameservers:
             addresses: {{ item.dns_servers | to_json }}
+      {% endif %}
   loop: "{{ kvm_clone_vms }}"

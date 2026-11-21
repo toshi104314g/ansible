@@ -8,7 +8,9 @@
       - -f
       - "{{ kvm_ssh_known_hosts_file }}"
   loop: "{{ kvm_clone_vms }}"
-  when: item.name not in kvm_domain_names
+  when:
+    - item.name not in kvm_domain_names
+    - item.ipv4_address | length > 0
   changed_when: true
 
 - name: Clone each template volume to its guest disk
@@ -46,8 +48,8 @@
           'vol=' ~ item.storage_pool ~ '/' ~ item.name ~ '.qcow2,bus=virtio',
           '--network',
           (
-            ('bridge=' ~ item.bridge_name)
-            if item.bridge_name
+            ('bridge=' ~ item.provisioning_bridge_name)
+            if item.provisioning_bridge_name
             else ('network=' ~ item.network_name)
           ) ~ ',model=virtio'
         ]

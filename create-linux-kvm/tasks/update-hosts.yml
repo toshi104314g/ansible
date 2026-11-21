@@ -10,6 +10,7 @@
       kvm_inventory_hostvars
       | dict2items
       | rejectattr('key', 'in', kvm_failed_clone_hostnames | default([]))
+      | selectattr('value.ansible_host', 'defined')
       | list
     }}
 
@@ -21,6 +22,7 @@
         kvm_inventory_hostvars
         | dict2items
         | rejectattr('key', 'in', kvm_failed_clone_hostnames | default([]))
+        | selectattr('value.ansible_host', 'defined')
         | map(attribute='key')
         | list
         | join(', ')

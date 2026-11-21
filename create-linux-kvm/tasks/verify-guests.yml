@@ -16,12 +16,15 @@
     that:
       - >-
         item.stdout | regex_search(
-          '(?m)^\\s+\\S+\\s+' ~ ('bridge' if kvm_network_mode == 'bridge' else 'network')
-          ~ '\\s+' ~ kvm_network_name ~ '\\s+'
+          '(?m)^\\s+\\S+\\s+'
+          ~ ('bridge' if item.item.provisioning_bridge_name | length > 0 else 'network')
+          ~ '\\s+'
+          ~ (item.item.provisioning_bridge_name if item.item.provisioning_bridge_name | length > 0 else item.item.network_name)
+          ~ '\\s+'
         ) is not none
     fail_msg: >-
-      KVM guest '{{ item.item.name }}' is not attached to the selected
-      {{ kvm_network_mode }} '{{ kvm_network_name }}'.
+      KVM guest '{{ item.item.name }}' is not attached to its selected
+      primary network.
   loop: "{{ kvm_guest_interfaces.results }}"
 
 - name: Ensure SELinux is disabled on Rocky guests
@@ -141,6 +144,6 @@
 - name: Report provisioned KVM guests
   ansible.builtin.debug:
     msg: >-
-      {{ item.name }} ({{ item.os }}) is reachable at {{ item.ipv4_address }}
-      as {{ item.ssh_user }}.
+      {{ item.name }} ({{ item.os }}) is reachable at
+      {{ item.ipv4_address }} as {{ item.ssh_user }}.
   loop: "{{ kvm_clone_vms }}"

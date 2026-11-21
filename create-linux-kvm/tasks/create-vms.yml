@@ -47,8 +47,6 @@
     kvm_inventory_hostvars: "{{ hostvars['localhost'].kvm_inventory_hostvars }}"
     kvm_domain_names: "{{ hostvars['localhost'].kvm_domain_names | default([]) }}"
     kvm_storage_pool: "{{ hostvars['localhost'].kvm_storage_pool }}"
-    kvm_network_mode: "{{ hostvars['localhost'].kvm_network_mode }}"
-    kvm_network_name: "{{ hostvars['localhost'].kvm_network_name }}"
     kvm_guest_ssh_public_keys: "{{ hostvars['localhost'].kvm_guest_ssh_public_keys }}"
 
   tasks:

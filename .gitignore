@@ -25,6 +25,8 @@ ansible.log
 
 # Local inventories
 /inventory/*
+!/inventory/group_vars/
+!/inventory/group_vars/*.yml
 *inventory*.ini
 *inventory*.yml
 *inventory*.yaml

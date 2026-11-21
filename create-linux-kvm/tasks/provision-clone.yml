@@ -18,6 +18,44 @@
           '{{ kvm_clone_vm.hostname }}' and differ from template image
           '{{ kvm_clone_vm.template_image }}'; this VM will be skipped.
 
+    - name: Select a temporary management address for KVM guest {{ kvm_clone_vm.name }}
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../select-temporary-ip.py"
+          - --interface
+          - "{{ kvm_temporary_management_bridge_name }}"
+          - --start
+          - "{{ kvm_temporary_management_ipv4_start | string }}"
+          - --end
+          - "{{ kvm_temporary_management_ipv4_end | string }}"
+          - --exclude
+          - >-
+            {{
+            hostvars.values()
+              | selectattr('ansible_host', 'defined')
+              | map(attribute='ansible_host')
+              | join(',')
+            }}
+      register: kvm_temporary_management_address
+      changed_when: false
+      when: kvm_clone_vm.temporary_management
+
+    - name: Use the temporary management address for KVM guest {{ kvm_clone_vm.name }}
+      ansible.builtin.set_fact:
+        kvm_clone_vm: >-
+          {{
+            kvm_clone_vm
+            | combine({'ipv4_address': kvm_temporary_management_address.stdout | trim})
+          }}
+        kvm_clone_vms:
+          - >-
+            {{
+              kvm_clone_vm
+              | combine({'ipv4_address': kvm_temporary_management_address.stdout | trim})
+            }}
+      when: kvm_clone_vm.temporary_management
+
     - name: Check whether the KVM guest IPv4 address conflicts with Ubuntu hosts entries
       ansible.builtin.command:
         argv:
@@ -28,6 +66,7 @@
       register: kvm_hosts_ip_check
       changed_when: false
       failed_when: kvm_hosts_ip_check.rc not in [0, 1]
+      when: kvm_clone_vm.ipv4_address | length > 0
 
     - name: Refuse to create the KVM guest when its IPv4 address is already assigned
       ansible.builtin.assert:
@@ -37,6 +76,7 @@
           KVM guest '{{ kvm_clone_vm.hostname }}' will be skipped because
           {{ kvm_clone_vm.ipv4_address }} is assigned to another name in Ubuntu /etc/hosts:
           {{ kvm_hosts_ip_check.stdout | trim }}.
+      when: kvm_clone_vm.ipv4_address | length > 0
 
     - name: Read initial state of an existing KVM clone
       ansible.builtin.command:
@@ -112,6 +152,14 @@
     - name: Verify the KVM guest and configure remaining identities
       ansible.builtin.import_tasks: verify-guests.yml
 
+    - name: Configure the KVM guest private IPv4 address
+      ansible.builtin.include_tasks: configure-private-network.yml
+      vars:
+        kvm_private_network_vm: "{{ kvm_clone_vm }}"
+      when:
+        - kvm_clone_vm.private_ipv4_bridge_name | length > 0
+        - kvm_clone_vm.private_ipv4_address | length > 0 or kvm_clone_vm.private_ipv4_dhcp
+
     - name: Configure KVM LAB and DMZ networks
       ansible.builtin.include_tasks: configure-lab-dmz-network.yml
       vars:
@@ -119,6 +167,12 @@
       when:
         - kvm_clone_vm.lab_ipv4_address | default('') | length > 0
           or kvm_clone_vm.dmz_ipv4_address | default('') | length > 0
+
+    - name: Remove temporary management access from KVM guest {{ kvm_clone_vm.name }}
+      ansible.builtin.include_tasks: detach-temporary-management.yml
+      vars:
+        kvm_temporary_management_vm: "{{ kvm_clone_vm }}"
+      when: kvm_clone_vm.temporary_management
 
   rescue:
     - name: Check whether failed KVM guest remains registered

@@ -4,7 +4,6 @@ all:
     linux_utm_guests:
       vars:
         utm_provision: clone
-        utm_network_connection: enp0s1
         utm_global_ipv6_prefix: "2409:"
         utm_ipv4_prefix_length: 24
         utm_ipv4_gateway: 192.168.10.1
@@ -32,7 +31,6 @@ all:
         ansible_ssh_common_args: >-
           -o StrictHostKeyChecking=accept-new
           -o UserKnownHostsFile={{ lookup('env', 'HOME') }}/.ssh/known_hosts.ansible-kvm
-        kvm_bridge_name: br0
         kvm_storage_pool: default
         kvm_ipv4_prefix_length: 24
         kvm_ipv4_gateway: 192.168.10.1

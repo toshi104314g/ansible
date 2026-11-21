@@ -1,0 +1,151 @@
+---
+- name: Read interfaces before detaching temporary management from {{ kvm_temporary_management_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - domiflist
+      - "{{ kvm_temporary_management_vm.name }}"
+  register: kvm_temporary_management_interfaces
+  changed_when: false
+
+- name: Identify the temporary management interface on {{ kvm_temporary_management_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - awk
+      - -v
+      - "source={{ kvm_temporary_management_bridge_name }}"
+      - '$2 == "bridge" && $3 == source { print $5 }'
+    stdin: "{{ kvm_temporary_management_interfaces.stdout }}"
+  register: kvm_temporary_management_mac_result
+  changed_when: false
+
+- name: Record temporary management interface MACs on {{ kvm_temporary_management_vm.name }}
+  ansible.builtin.set_fact:
+    kvm_temporary_management_macs: "{{ kvm_temporary_management_mac_result.stdout_lines }}"
+
+- name: Require one temporary management interface on {{ kvm_temporary_management_vm.name }}
+  ansible.builtin.assert:
+    that:
+      - kvm_temporary_management_macs | length == 1
+      - kvm_temporary_management_bridge_name != kvm_temporary_management_vm.private_ipv4_bridge_name
+    fail_msg: >-
+      KVM guest '{{ kvm_temporary_management_vm.name }}' must have exactly one
+      temporary management interface on '{{ kvm_temporary_management_bridge_name }}'
+      and a distinct private bridge.
+
+- name: Disable persistent IPv4 on the temporary management interface
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ kvm_temporary_management_vm.ssh_user }}@{{ kvm_temporary_management_vm.ipv4_address }}"
+      - sudo
+      - -n
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -euo pipefail
+
+      expected_mac={{ kvm_temporary_management_macs | first | lower | quote }}
+      interface=
+      for path in /sys/class/net/*; do
+        mac=$(cat "$path/address")
+        if [ "$mac" = "$expected_mac" ]; then
+          interface=${path##*/}
+          break
+        fi
+      done
+      test -n "$interface"
+      connection=$(nmcli -g GENERAL.CONNECTION device show "$interface")
+      test -n "$connection"
+      test "$connection" != --
+      nmcli connection modify "$connection" \
+        ipv4.method disabled \
+        ipv4.addresses "" \
+        ipv4.gateway "" \
+        ipv4.dns "" \
+        ipv4.routes "" \
+        ipv6.method ignore \
+        connection.autoconnect no
+      echo temporary-management-disabled
+  register: kvm_temporary_management_disable
+  changed_when: "'temporary-management-disabled' in kvm_temporary_management_disable.stdout"
+
+- name: Detach the temporary management interface from {{ kvm_temporary_management_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - detach-interface
+      - "{{ kvm_temporary_management_vm.name }}"
+      - --type
+      - bridge
+      - --mac
+      - "{{ kvm_temporary_management_macs | first }}"
+      - --live
+      - --config
+  register: kvm_temporary_management_detach
+  changed_when: true
+
+- name: Verify the final private-only network attachment on {{ kvm_temporary_management_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - domiflist
+      - "{{ kvm_temporary_management_vm.name }}"
+  register: kvm_temporary_management_final_interfaces
+  changed_when: false
+  until: >-
+    kvm_temporary_management_bridge_name
+    not in (
+      kvm_temporary_management_final_interfaces.stdout
+      | regex_findall('(?m)^\\s+\\S+\\s+bridge\\s+(\\S+)\\s+')
+    )
+    and kvm_temporary_management_vm.private_ipv4_bridge_name
+    in (
+      kvm_temporary_management_final_interfaces.stdout
+      | regex_findall('(?m)^\\s+\\S+\\s+bridge\\s+(\\S+)\\s+')
+    )
+  retries: 5
+  delay: 2
+
+- name: Verify {{ kvm_temporary_management_vm.name }} remains responsive through QEMU Guest Agent
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - qemu-agent-command
+      - "{{ kvm_temporary_management_vm.name }}"
+      - '{"execute":"guest-get-host-name"}'
+  register: kvm_temporary_management_agent_check
+  changed_when: false
+  until: >-
+    kvm_temporary_management_agent_check.rc == 0
+    and kvm_temporary_management_vm.hostname in kvm_temporary_management_agent_check.stdout
+  retries: "{{ kvm_poll_retries }}"
+  delay: "{{ kvm_poll_delay }}"
+
+- name: Remove the temporary management address from SSH known hosts
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -R
+      - "{{ kvm_temporary_management_vm.ipv4_address }}"
+      - -f
+      - "{{ kvm_ssh_known_hosts_file }}"
+  changed_when: true

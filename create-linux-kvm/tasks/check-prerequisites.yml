@@ -35,38 +35,40 @@
   changed_when: false
   failed_when: kvm_pool_info.stdout | regex_search('(?m)^State:\\s+running$') is none
 
-- name: Verify the selected libvirt network is active
+- name: Locate arping for temporary KVM management
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - command -v arping
+  register: kvm_arping_path
+  changed_when: false
+  failed_when: false
+  when: kvm_clone_vms | selectattr('temporary_management', 'equalto', true) | list | length > 0
+
+- name: Require arping for temporary KVM management
+  ansible.builtin.assert:
+    that:
+      - kvm_arping_path.rc == 0
+    fail_msg: >-
+      Temporary management requires arping on the KVM host.
+      Install iputils-arping before provisioning.
+  when: kvm_clone_vms | selectattr('temporary_management', 'equalto', true) | list | length > 0
+
+- name: Verify requested libvirt networks are active
   ansible.builtin.command:
     argv:
       - virsh
       - --connect
       - "{{ kvm_connection }}"
       - net-info
-      - "{{ kvm_network_name }}"
+      - "{{ item }}"
   register: kvm_network_info
   changed_when: false
   failed_when: kvm_network_info.stdout | regex_search('(?m)^Active:\\s+yes$') is none
-  when: kvm_network_mode == 'network'
+  loop: "{{ kvm_required_network_names }}"
 
-- name: Verify the selected host interface is an active Linux bridge
-  ansible.builtin.command:
-    argv:
-      - ip
-      - -json
-      - -details
-      - link
-      - show
-      - dev
-      - "{{ kvm_network_name }}"
-  register: kvm_bridge_info
-  changed_when: false
-  failed_when: >-
-    (kvm_bridge_info.stdout | from_json | length != 1)
-    or (kvm_bridge_info.stdout | from_json | first).linkinfo.info_kind != 'bridge'
-    or 'UP' not in (kvm_bridge_info.stdout | from_json | first).flags
-  when: kvm_network_mode == 'bridge'
-
-- name: Verify each requested LAB or DMZ bridge is active
+- name: Verify requested host interfaces are active Linux bridges
   ansible.builtin.command:
     argv:
       - ip
@@ -76,15 +78,13 @@
       - show
       - dev
       - "{{ item }}"
-  register: kvm_additional_bridge_info
+  register: kvm_bridge_info
   changed_when: false
   failed_when: >-
-    kvm_additional_bridge_info.rc != 0
-    or
-    (kvm_additional_bridge_info.stdout | from_json | length != 1)
-    or (kvm_additional_bridge_info.stdout | from_json | first).linkinfo.info_kind != 'bridge'
-    or 'UP' not in (kvm_additional_bridge_info.stdout | from_json | first).flags
-  loop: "{{ kvm_additional_bridge_names }}"
+    (kvm_bridge_info.stdout | from_json | length != 1)
+    or (kvm_bridge_info.stdout | from_json | first).linkinfo.info_kind != 'bridge'
+    or 'UP' not in (kvm_bridge_info.stdout | from_json | first).flags
+  loop: "{{ kvm_required_bridge_names }}"
 
 - name: Record registered libvirt domain names
   ansible.builtin.set_fact:

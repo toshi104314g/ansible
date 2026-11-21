@@ -60,7 +60,27 @@
       - item.value.ansible_host is defined
       - item.value.ansible_host is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
       - item.value.ansible_host.split('.') | map('int') | select('gt', 255) | list | length == 0
-      - item.value.utm_network_connection is defined
+      - >-
+        item.value.utm_management_guest_interface is defined
+        or item.value.utm_network_connection is defined
+      - item.value.utm_management_host_interface is defined
+      - item.value.utm_management_host_interface | length > 0
+      - item.value.utm_secondary_guest_interface is defined
+      - item.value.utm_secondary_guest_interface | length > 0
+      - item.value.utm_tertiary_guest_interface is defined
+      - item.value.utm_tertiary_guest_interface | length > 0
+      - >-
+        item.value.lab_ipv4_address is not defined
+        or (
+          item.value.utm_lab_host_interface is defined
+          and item.value.utm_lab_host_interface | length > 0
+        )
+      - >-
+        item.value.dmz_ipv4_address is not defined
+        or (
+          item.value.utm_dmz_host_interface is defined
+          and item.value.utm_dmz_host_interface | length > 0
+        )
       - item.value.utm_global_ipv6_prefix is defined
       - item.value.utm_ipv4_prefix_length is defined
       - item.value.utm_ipv4_gateway is defined
@@ -73,7 +93,7 @@
         or (
           item.value.lab_ipv4_address is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
           and item.value.lab_ipv4_address.split('.') | map('int') | select('gt', 255) | list | length == 0
-          and item.value.lab_ipv4_address.split('.')[-1] | int > 1
+          and item.value.lab_ipv4_address.split('.')[-1] | int > 0
           and item.value.lab_ipv4_address.split('.')[-1] | int < 255
         )
       - >-
@@ -81,7 +101,7 @@
         or (
           item.value.dmz_ipv4_address is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
           and item.value.dmz_ipv4_address.split('.') | map('int') | select('gt', 255) | list | length == 0
-          and item.value.dmz_ipv4_address.split('.')[-1] | int > 1
+          and item.value.dmz_ipv4_address.split('.')[-1] | int > 0
           and item.value.dmz_ipv4_address.split('.')[-1] | int < 255
         )
       - >-
@@ -93,7 +113,13 @@
           item.value.lab_ipv4_address is not defined
           and item.value.dmz_ipv4_address is not defined
         )
-        or item.value.utm_network_connection == 'enp0s1'
+        or (
+          item.value.utm_management_guest_interface is not defined
+          or (
+            item.value.utm_network_connection
+            | default(item.value.utm_management_guest_interface)
+          ) == item.value.utm_management_guest_interface
+        )
       - >-
         (
           item.value.lab_ipv4_address is not defined
@@ -107,10 +133,11 @@
     fail_msg: >-
       Host '{{ item.key }}' must define utm_os (rocky9 or ubuntu26),
       utm_template_name, utm_vm_name, utm_provision, ansible_host,
-      utm_network_connection, utm_global_ipv6_prefix, and IPv4 network settings.
+      utm_management_guest_interface (or legacy utm_network_connection),
+      utm_global_ipv6_prefix, and IPv4 network settings.
       lab_ipv4_address and dmz_ipv4_address, when provided, must be usable host
-      addresses. Hosts using either network must use enp0s1 for management and
-      retain 192.168.10.1 as their management default gateway.
+      addresses. Hosts using either network must use the configured management
+      guest interface and retain 192.168.10.1 as their management default gateway.
       Existing hosts also require utm_ssh_alias.
   loop: "{{ utm_inventory_hostvars | dict2items }}"
 
@@ -146,7 +173,14 @@
           'ssh_user': linux_ansible_user,
           'bootstrap_user': 'root' if item.value.utm_os == 'rocky9' else 'toshiyuki',
           'ipv4_address': item.value.ansible_host,
-          'network_connection': item.value.utm_network_connection,
+          'network_connection':
+            item.value.utm_network_connection
+            | default(item.value.utm_management_guest_interface),
+          'management_host_interface': item.value.utm_management_host_interface,
+          'lab_host_interface': item.value.utm_lab_host_interface,
+          'dmz_host_interface': item.value.utm_dmz_host_interface,
+          'secondary_guest_interface': item.value.utm_secondary_guest_interface,
+          'tertiary_guest_interface': item.value.utm_tertiary_guest_interface,
           'global_ipv6_prefix': item.value.utm_global_ipv6_prefix,
           'ipv4_prefix_length': item.value.utm_ipv4_prefix_length,
           'ipv4_gateway': item.value.utm_ipv4_gateway,
@@ -167,7 +201,14 @@
           'ssh_alias': item.value.utm_ssh_alias | default(''),
           'expected_hostname': item.value.utm_expected_hostname | default(item.key),
           'ipv4_address': item.value.ansible_host,
-          'network_connection': item.value.utm_network_connection,
+          'network_connection':
+            item.value.utm_network_connection
+            | default(item.value.utm_management_guest_interface),
+          'management_host_interface': item.value.utm_management_host_interface,
+          'lab_host_interface': item.value.utm_lab_host_interface,
+          'dmz_host_interface': item.value.utm_dmz_host_interface,
+          'secondary_guest_interface': item.value.utm_secondary_guest_interface,
+          'tertiary_guest_interface': item.value.utm_tertiary_guest_interface,
           'global_ipv6_prefix': item.value.utm_global_ipv6_prefix,
           'ipv4_prefix_length': item.value.utm_ipv4_prefix_length,
           'ipv4_gateway': item.value.utm_ipv4_gateway,

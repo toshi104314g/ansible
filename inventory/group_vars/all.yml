@@ -1,0 +1,15 @@
+# UTM host-side interfaces bridged into each VM.
+utm_management_host_interface: en7
+utm_lab_host_interface: vlan0
+utm_dmz_host_interface: vlan1
+
+# UTM interface names inside the guest, ordered by virtual NIC position.
+utm_management_guest_interface: enp0s1
+utm_secondary_guest_interface: enp0s2
+utm_tertiary_guest_interface: enp0s3
+
+# KVM host-side management and additional-network attachments.
+kvm_management_connection_type: bridge
+kvm_management_connection_name: br0
+kvm_lab_bridge_name: br100
+kvm_dmz_bridge_name: br200

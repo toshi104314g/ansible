@@ -60,12 +60,93 @@
       - item.value.kvm_vm_name != (item.value.kvm_template_image | basename)
       - item.value.kvm_provision is defined
       - item.value.kvm_provision in ['clone', 'existing']
-      - item.value.ansible_host is defined
-      - item.value.ansible_host is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
-      - item.value.ansible_host.split('.') | map('int') | select('gt', 255) | list | length == 0
-      - (item.value.kvm_network_name is defined) != (item.value.kvm_bridge_name is defined)
+      - >-
+        item.value.ansible_host is defined
+        or (
+          item.value.kvm_temporary_management | default(false) | bool
+          and item.value.kvm_provision == 'clone'
+          and item.value.private_ipv4_dhcp | default(false) | bool
+        )
+      - >-
+        item.value.ansible_host is not defined
+        or (
+          item.value.ansible_host is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+          and item.value.ansible_host.split('.') | map('int') | select('gt', 255) | list | length == 0
+        )
+      - >-
+        not (item.value.kvm_temporary_management | default(false) | bool)
+        or (
+          item.value.kvm_temporary_management | bool
+          and item.value.ansible_host is not defined
+          and item.value.private_ipv4_dhcp | default(false) | bool
+          and item.value.kvm_os == 'rocky9'
+          and item.value.kvm_management_connection_type | default('') == 'bridge'
+          and item.value.private_ipv4_bridge_name
+            != (
+              item.value.kvm_temporary_management_bridge_name
+              | default(item.value.kvm_management_connection_name | default(''))
+            )
+        )
+      - >-
+        not (
+          item.value.kvm_network_name is defined
+          and item.value.kvm_bridge_name is defined
+        )
+      - >-
+        item.value.kvm_network_name is defined
+        or item.value.kvm_bridge_name is defined
+        or (
+          item.value.kvm_management_connection_type | default('') in ['bridge', 'network']
+          and item.value.kvm_management_connection_name | default('') | length > 0
+        )
       - item.value.kvm_network_name is not defined or item.value.kvm_network_name | length > 0
       - item.value.kvm_bridge_name is not defined or item.value.kvm_bridge_name is match('^[A-Za-z0-9_.-]+$')
+      - >-
+        item.value.private_ipv4_bridge_name is not defined
+        or item.value.private_ipv4_bridge_name is match('^[A-Za-z0-9_.-]+$')
+      - >-
+        (
+          item.value.private_ipv4_address is not defined
+          and item.value.private_ipv4_dhcp | default(false) | bool == false
+        )
+        or item.value.private_ipv4_bridge_name is defined
+      - >-
+        item.value.private_ipv4_address is not defined
+        or (
+          item.value.private_ipv4_address is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+          and item.value.private_ipv4_address.split('.') | map('int') | select('gt', 255) | list | length == 0
+          and item.value.private_ipv4_address.split('.')[-1] | int > 0
+          and item.value.private_ipv4_address.split('.')[-1] | int < 255
+        )
+      - >-
+        not (item.value.private_ipv4_dhcp | default(false) | bool)
+        or (
+          item.value.private_ipv4_bridge_name
+          == (
+            item.value.kvm_bridge_name
+            | default(
+                item.value.kvm_management_connection_name
+                if item.value.kvm_network_name is not defined
+                  and item.value.kvm_management_connection_type | default('') == 'bridge'
+                else ''
+              )
+          )
+        )
+      - >-
+        not (
+          item.value.private_ipv4_address is defined
+          and not (item.value.private_ipv4_dhcp | default(false) | bool)
+          and item.value.private_ipv4_bridge_name
+            == (
+              item.value.kvm_bridge_name
+              | default(
+                  item.value.kvm_management_connection_name
+                  if item.value.kvm_network_name is not defined
+                    and item.value.kvm_management_connection_type | default('') == 'bridge'
+                  else ''
+                )
+            )
+        )
       - item.value.kvm_storage_pool is defined
       - item.value.kvm_ipv4_prefix_length is defined
       - item.value.kvm_ipv4_prefix_length | int >= 1
@@ -78,7 +159,7 @@
         or (
           item.value.lab_ipv4_address is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
           and item.value.lab_ipv4_address.split('.') | map('int') | select('gt', 255) | list | length == 0
-          and item.value.lab_ipv4_address.split('.')[-1] | int > 1
+          and item.value.lab_ipv4_address.split('.')[-1] | int > 0
           and item.value.lab_ipv4_address.split('.')[-1] | int < 255
         )
       - >-
@@ -86,7 +167,7 @@
         or (
           item.value.dmz_ipv4_address is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
           and item.value.dmz_ipv4_address.split('.') | map('int') | select('gt', 255) | list | length == 0
-          and item.value.dmz_ipv4_address.split('.')[-1] | int > 1
+          and item.value.dmz_ipv4_address.split('.')[-1] | int > 0
           and item.value.dmz_ipv4_address.split('.')[-1] | int < 255
         )
       - >-
@@ -94,13 +175,27 @@
         or item.value.dmz_ipv4_address is not defined
         or item.value.lab_ipv4_address != item.value.dmz_ipv4_address
       - >-
-        item.value.kvm_bridge_name is not defined
+        (
+          item.value.kvm_bridge_name
+          | default(
+              item.value.kvm_management_connection_name
+              if item.value.kvm_network_name is not defined
+                and item.value.kvm_management_connection_type | default('') == 'bridge'
+              else ''
+            )
+        ) != item.value.kvm_lab_bridge_name
         or item.value.lab_ipv4_address is not defined
-        or item.value.kvm_bridge_name != kvm_lab_bridge_name
       - >-
-        item.value.kvm_bridge_name is not defined
+        (
+          item.value.kvm_bridge_name
+          | default(
+              item.value.kvm_management_connection_name
+              if item.value.kvm_network_name is not defined
+                and item.value.kvm_management_connection_type | default('') == 'bridge'
+              else ''
+            )
+        ) != item.value.kvm_dmz_bridge_name
         or item.value.dmz_ipv4_address is not defined
-        or item.value.kvm_bridge_name != kvm_dmz_bridge_name
       - >-
         (
           item.value.lab_ipv4_address is not defined
@@ -109,28 +204,41 @@
         or item.value.kvm_ipv4_gateway == '192.168.10.1'
     fail_msg: >-
       Host '{{ item.key }}' must specify kvm_os (rocky9 or ubuntu26),
-      kvm_template_image, kvm_vm_name, kvm_provision, ansible_host,
-      exactly one of kvm_network_name or kvm_bridge_name, kvm_storage_pool,
-      and IPv4 network settings. Optional lab_ipv4_address and dmz_ipv4_address
-      values must be usable host addresses. Hosts using either network must
-      retain 192.168.10.1 as their management default gateway.
+      kvm_template_image, kvm_vm_name, kvm_provision, and either ansible_host
+      or a DHCP-enabled temporary-management configuration, plus a valid
+      network attachment, kvm_storage_pool, and IPv4 network settings.
+      Optional LAB, DMZ, and private addresses must be usable host addresses.
+      Hosts using LAB or DMZ must retain 192.168.10.1 as their management
+      default gateway. Guests without a management address must use
+      kvm_temporary_management with a DHCP-enabled private bridge.
   loop: "{{ kvm_inventory_hostvars | dict2items }}"
 
 - name: Require unique VM names and IPv4 addresses
   ansible.builtin.assert:
     that:
       - (kvm_inventory_hostvars.values() | map(attribute='kvm_vm_name') | list | unique | length) == (kvm_inventory_hostvars | length)
-      - (kvm_inventory_hostvars.values() | map(attribute='ansible_host') | list | unique | length) == (kvm_inventory_hostvars | length)
+      - >-
+        (
+          kvm_inventory_hostvars.values()
+          | selectattr('ansible_host', 'defined')
+          | map(attribute='ansible_host')
+          | list
+          | unique
+          | length
+        )
+        ==
+        (
+          kvm_inventory_hostvars.values()
+          | selectattr('ansible_host', 'defined')
+          | list
+          | length
+        )
     fail_msg: "Inventory KVM VM names and IPv4 addresses must be unique."
 
 - name: Require consistent storage and network settings
   ansible.builtin.assert:
     that:
       - (kvm_inventory_hostvars.values() | map(attribute='kvm_storage_pool') | unique | length) == 1
-      - (kvm_inventory_hostvars.values() | selectattr('kvm_network_name', 'defined') | list | length) in [0, kvm_inventory_hostvars | length]
-      - (kvm_inventory_hostvars.values() | selectattr('kvm_bridge_name', 'defined') | list | length) in [0, kvm_inventory_hostvars | length]
-      - (kvm_inventory_hostvars.values() | selectattr('kvm_network_name', 'defined') | map(attribute='kvm_network_name') | unique | length) <= 1
-      - (kvm_inventory_hostvars.values() | selectattr('kvm_bridge_name', 'defined') | map(attribute='kvm_bridge_name') | unique | length) <= 1
       - (kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_prefix_length') | unique | length) == 1
       - (kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_gateway') | unique | length) == 1
       - (kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_dns_servers') | unique | length) == 1
@@ -225,27 +333,73 @@
           'ssh_user': linux_ansible_user,
           'bootstrap_user': 'root' if item.value.kvm_os == 'rocky9' else 'toshiyuki',
           'template_image': item.value.kvm_template_image | basename,
-          'ipv4_address': item.value.ansible_host,
-          'network_name': item.value.kvm_network_name | default(''),
-          'bridge_name': item.value.kvm_bridge_name | default(''),
+          'ipv4_address': item.value.ansible_host | default(''),
+          'network_name': item.value.kvm_network_name | default(
+            item.value.kvm_management_connection_name
+            if item.value.kvm_bridge_name is not defined
+              and item.value.kvm_management_connection_type | default('') == 'network'
+            else ''
+          ),
+          'bridge_name': item.value.kvm_bridge_name | default(
+            item.value.kvm_management_connection_name
+            if item.value.kvm_network_name is not defined
+              and item.value.kvm_management_connection_type | default('') == 'bridge'
+            else ''
+          ),
           'storage_pool': item.value.kvm_storage_pool,
           'prefix_length': item.value.kvm_ipv4_prefix_length,
           'gateway': item.value.kvm_ipv4_gateway,
           'dns_servers': item.value.kvm_ipv4_dns_servers,
           'lab_ipv4_address': item.value.lab_ipv4_address | default(''),
           'dmz_ipv4_address': item.value.dmz_ipv4_address | default(''),
+          'private_ipv4_address': item.value.private_ipv4_address | default(''),
+          'private_ipv4_bridge_name': item.value.private_ipv4_bridge_name | default(''),
+          'private_ipv4_dhcp': item.value.private_ipv4_dhcp | default(false) | bool,
+          'temporary_management': item.value.kvm_temporary_management | default(false) | bool,
+          'provisioning_bridge_name': (
+            item.value.kvm_temporary_management_bridge_name
+            | default(item.value.kvm_management_connection_name | default(''))
+            if item.value.kvm_temporary_management | default(false) | bool
+            else (
+              item.value.kvm_bridge_name
+              | default(
+                  item.value.kvm_management_connection_name
+                  if item.value.kvm_network_name is not defined
+                    and item.value.kvm_management_connection_type | default('') == 'bridge'
+                  else ''
+                )
+            )
+          ),
           'memory_mb': item.value.kvm_memory_mb | default(kvm_default_memory_mb),
           'vcpus': item.value.kvm_vcpus | default(kvm_default_vcpus),
           'additional_bridge_names':
             (
-              [kvm_lab_bridge_name]
+              [item.value.kvm_lab_bridge_name]
               if item.value.lab_ipv4_address is defined
               else []
             )
             +
             (
-              [kvm_dmz_bridge_name]
+              [item.value.kvm_dmz_bridge_name]
               if item.value.dmz_ipv4_address is defined
+              else []
+            )
+            +
+            (
+              [item.value.private_ipv4_bridge_name]
+              if item.value.private_ipv4_bridge_name is defined
+                and (
+                  item.value.kvm_temporary_management | default(false) | bool
+                  or item.value.private_ipv4_bridge_name != (
+                    item.value.kvm_bridge_name
+                    | default(
+                        item.value.kvm_management_connection_name
+                        if item.value.kvm_network_name is not defined
+                          and item.value.kvm_management_connection_type | default('') == 'bridge'
+                        else ''
+                      )
+                  )
+                )
               else []
             )
         }] if item.value.kvm_provision == 'clone' else [])
@@ -259,24 +413,58 @@
           'os': item.value.kvm_os,
           'ssh_user': linux_ansible_user,
           'bootstrap_user': 'root' if item.value.kvm_os == 'rocky9' else 'toshiyuki',
-          'ipv4_address': item.value.ansible_host,
-          'network_name': item.value.kvm_network_name | default(''),
-          'bridge_name': item.value.kvm_bridge_name | default(''),
+          'ipv4_address': item.value.ansible_host | default(''),
+          'network_name': item.value.kvm_network_name | default(
+            item.value.kvm_management_connection_name
+            if item.value.kvm_bridge_name is not defined
+              and item.value.kvm_management_connection_type | default('') == 'network'
+            else ''
+          ),
+          'bridge_name': item.value.kvm_bridge_name | default(
+            item.value.kvm_management_connection_name
+            if item.value.kvm_network_name is not defined
+              and item.value.kvm_management_connection_type | default('') == 'bridge'
+            else ''
+          ),
+          'provisioning_bridge_name': item.value.kvm_bridge_name | default(
+            item.value.kvm_management_connection_name
+            if item.value.kvm_network_name is not defined
+              and item.value.kvm_management_connection_type | default('') == 'bridge'
+            else ''
+          ),
           'prefix_length': item.value.kvm_ipv4_prefix_length,
           'gateway': item.value.kvm_ipv4_gateway,
           'dns_servers': item.value.kvm_ipv4_dns_servers,
           'lab_ipv4_address': item.value.lab_ipv4_address | default(''),
           'dmz_ipv4_address': item.value.dmz_ipv4_address | default(''),
+          'private_ipv4_address': item.value.private_ipv4_address | default(''),
+          'private_ipv4_bridge_name': item.value.private_ipv4_bridge_name | default(''),
+          'private_ipv4_dhcp': item.value.private_ipv4_dhcp | default(false) | bool,
           'additional_bridge_names':
             (
-              [kvm_lab_bridge_name]
+              [item.value.kvm_lab_bridge_name]
               if item.value.lab_ipv4_address is defined
               else []
             )
             +
             (
-              [kvm_dmz_bridge_name]
+              [item.value.kvm_dmz_bridge_name]
               if item.value.dmz_ipv4_address is defined
+              else []
+            )
+            +
+            (
+              [item.value.private_ipv4_bridge_name]
+              if item.value.private_ipv4_bridge_name is defined
+                and item.value.private_ipv4_bridge_name != (
+                  item.value.kvm_bridge_name
+                  | default(
+                      item.value.kvm_management_connection_name
+                      if item.value.kvm_network_name is not defined
+                        and item.value.kvm_management_connection_type | default('') == 'bridge'
+                      else ''
+                    )
+                )
               else []
             )
         }] if item.value.kvm_provision == 'existing' else [])
@@ -292,16 +480,22 @@
       }}
   loop: "{{ kvm_inventory_hostvars | dict2items }}"
 
+- name: Require each KVM VM to resolve to one management attachment
+  ansible.builtin.assert:
+    that:
+      - (item.network_name | length > 0) != (item.bridge_name | length > 0)
+      - item.additional_bridge_names | length <= 2
+    fail_msg: >-
+      KVM guest '{{ item.name }}' must resolve to exactly one management
+      network or bridge attachment and may request at most two additional
+      bridges.
+  loop: "{{ kvm_clone_vms + kvm_existing_vms }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: Record common storage and network settings
   ansible.builtin.set_fact:
     kvm_storage_pool: "{{ kvm_inventory_hostvars.values() | map(attribute='kvm_storage_pool') | first }}"
-    kvm_network_mode: "{{ 'bridge' if kvm_inventory_hostvars.values() | selectattr('kvm_bridge_name', 'defined') | list | length else 'network' }}"
-    kvm_network_name: >-
-      {{
-        (kvm_inventory_hostvars.values() | map(attribute='kvm_bridge_name') | first)
-        if kvm_inventory_hostvars.values() | selectattr('kvm_bridge_name', 'defined') | list | length
-        else (kvm_inventory_hostvars.values() | map(attribute='kvm_network_name') | first)
-      }}
     kvm_ipv4_prefix_length: "{{ kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_prefix_length') | first }}"
     kvm_ipv4_gateway: "{{ kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_gateway') | first }}"
     kvm_ipv4_dns_servers: "{{ kvm_inventory_hostvars.values() | map(attribute='kvm_ipv4_dns_servers') | first }}"
@@ -315,3 +509,24 @@
         | unique
         | list
       }}
+    kvm_primary_bridge_names: >-
+      {{
+        (kvm_clone_vms + kvm_existing_vms)
+        | map(attribute='provisioning_bridge_name')
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+    kvm_primary_network_names: >-
+      {{
+        (kvm_clone_vms + kvm_existing_vms)
+        | map(attribute='network_name')
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+
+- name: Combine requested KVM bridge and network attachments
+  ansible.builtin.set_fact:
+    kvm_required_bridge_names: "{{ (kvm_primary_bridge_names + kvm_additional_bridge_names) | unique | list }}"
+    kvm_required_network_names: "{{ kvm_primary_network_names }}"

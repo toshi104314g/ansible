@@ -37,7 +37,6 @@ all:
 
   vars:
     utm_provision: clone
-    utm_network_connection: enp0s1
     utm_global_ipv6_prefix: "2409:"
     utm_ipv4_prefix_length: 24
     utm_ipv4_gateway: 192.168.10.1

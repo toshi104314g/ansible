@@ -144,20 +144,32 @@
           - >-
             (1 if item.value.utm_vm_name is defined else 0)
             + (1 if item.value.kvm_vm_name is defined else 0) == 1
-          - item.value.ansible_host is defined
+          - >-
+            item.value.ansible_host is defined
+            or (
+              item.value.kvm_vm_name is defined
+              and item.value.kvm_provision | default('') == 'clone'
+              and item.value.kvm_temporary_management | default(false) | bool
+              and item.value.private_ipv4_dhcp | default(false) | bool
+              and item.value.private_ipv4_bridge_name is defined
+            )
         fail_msg: >-
-          Inventory host '{{ item.key }}' must define ansible_host and exactly
-          one of utm_vm_name or kvm_vm_name.
+          Inventory host '{{ item.key }}' must define exactly one of
+          utm_vm_name or kvm_vm_name and either ansible_host or a valid
+          temporary-management KVM configuration.
       loop: "{{ unified_linux_selected_hostvars | dict2items }}"
 
-    - name: Require unique IPv4 addresses among selected guests
+    - name: Require unique permanent IPv4 addresses among selected guests
       ansible.builtin.assert:
         that:
           - >-
             (unified_linux_selected_hostvars.values()
+            | selectattr('ansible_host', 'defined')
             | map(attribute='ansible_host') | list | unique | length)
-            == (unified_linux_selected_hostvars | length)
-        fail_msg: "Every UTM and KVM guest must have a unique ansible_host IPv4 address."
+            ==
+            (unified_linux_selected_hostvars.values()
+            | selectattr('ansible_host', 'defined') | list | length)
+        fail_msg: "Every configured ansible_host IPv4 address must be unique."
 
     - name: Create a private workspace for the selected inventory
       ansible.builtin.tempfile:
@@ -338,6 +350,7 @@
               (unified_linux_failed_utm_hosts | default([]))
               + (unified_linux_failed_kvm_hosts | default([]))
             )
+          | selectattr('value.ansible_host', 'defined')
           | list
         }}
       tags:
@@ -405,7 +418,14 @@
           - --tags
           - delete
           - --extra-vars
-          - "{{ {'kvm_wrapper_delete_confirmation_input': 'DELETE'} | to_json }}"
+          - >-
+            {{
+              {
+                'kvm_wrapper_delete_confirmation_input': 'DELETE',
+                'kvm_skip_mac_hosts_file':
+                  kvm_skip_mac_hosts_file | default(false) | bool
+              } | to_json
+            }}
 
   tasks:
     - name: Confirm UTM deletion

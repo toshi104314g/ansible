@@ -1,0 +1,202 @@
+---
+- name: Read bridge interfaces for KVM guest {{ kvm_private_network_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - virsh
+      - --connect
+      - "{{ kvm_connection }}"
+      - domiflist
+      - "{{ kvm_private_network_vm.name }}"
+  register: kvm_private_network_interfaces
+  changed_when: false
+
+- name: Identify the private bridge interface for KVM guest {{ kvm_private_network_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - awk
+      - -v
+      - "source={{ kvm_private_network_vm.private_ipv4_bridge_name }}"
+      - '$2 == "bridge" && $3 == source { print $5 }'
+    stdin: "{{ kvm_private_network_interfaces.stdout }}"
+  register: kvm_private_interface_mac_result
+  changed_when: false
+
+- name: Record private bridge interface MACs for KVM guest {{ kvm_private_network_vm.name }}
+  ansible.builtin.set_fact:
+    kvm_private_interface_macs: "{{ kvm_private_interface_mac_result.stdout_lines }}"
+
+- name: Require one private bridge interface on KVM guest {{ kvm_private_network_vm.name }}
+  ansible.builtin.assert:
+    that:
+      - kvm_private_interface_macs | length == 1
+    fail_msg: >-
+      KVM guest '{{ kvm_private_network_vm.name }}' must have exactly one
+      interface attached to private bridge
+      '{{ kvm_private_network_vm.private_ipv4_bridge_name }}'. Found
+      {{ kvm_private_interface_macs | length }} matching interface(s);
+      parsed MACs: {{ kvm_private_interface_macs | to_json }}.
+      virsh domiflist output: {{ kvm_private_network_interfaces.stdout | trim }}
+
+- name: Configure the private IPv4 address on KVM guest {{ kvm_private_network_vm.name }}
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ kvm_ssh_private_key_file }}"
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=5
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - "UserKnownHostsFile={{ kvm_ssh_known_hosts_file }}"
+      - "{{ kvm_private_network_vm.ssh_user }}@{{ kvm_private_network_vm.ipv4_address }}"
+      - sudo
+      - -n
+      - /usr/bin/bash
+      - -s
+    stdin: |
+      set -euo pipefail
+
+      expected_mac={{ kvm_private_interface_macs | first | lower | quote }}
+      address={{ (kvm_private_network_vm.private_ipv4_address ~ '/24') | quote }}
+      interface=
+      for path in /sys/class/net/*; do
+        mac=$(cat "$path/address")
+        if [ "$mac" = "$expected_mac" ]; then
+          interface=${path##*/}
+          break
+        fi
+      done
+      test -n "$interface"
+
+      {% if kvm_private_network_vm.private_ipv4_dhcp %}
+      {% if kvm_private_network_vm.os == 'rocky9' %}
+      if nmcli -g NAME connection show | grep -Fxq private-net; then
+        if [ "$(nmcli -g 802-3-ethernet.mac-address connection show private-net | tr '[:upper:]' '[:lower:]')" = "$expected_mac" ] &&
+          [ "$(nmcli -g ipv4.method connection show private-net)" = auto ] &&
+          [ "$(nmcli -g ipv4.never-default connection show private-net)" = no ] &&
+          [ "$(nmcli -g connection.autoconnect connection show private-net)" = yes ]; then
+          echo private-network-unchanged
+          exit 0
+        fi
+        nmcli connection modify private-net \
+          connection.interface-name "$interface" \
+          802-3-ethernet.mac-address "$expected_mac" \
+          ipv4.method auto \
+          ipv4.never-default no \
+          ipv6.method auto \
+          connection.autoconnect yes \
+          connection.autoconnect-priority 100
+      else
+        nmcli connection add type ethernet \
+          con-name private-net \
+          ifname "$interface" \
+          802-3-ethernet.mac-address "$expected_mac" \
+          ipv4.method auto \
+          ipv4.never-default no \
+          ipv6.method auto \
+          connection.autoconnect yes \
+          connection.autoconnect-priority 100
+      fi
+      active_connection=$(nmcli -g GENERAL.CONNECTION device show "$interface")
+      if [ -n "$active_connection" ] &&
+        [ "$active_connection" != "--" ] &&
+        [ "$active_connection" != private-net ]; then
+        nmcli connection delete "$active_connection"
+      fi
+      echo private-network-changed
+      {% else %}
+      if [ -f /etc/netplan/99-ansible-private.yaml ] &&
+        grep -Fq "$expected_mac" /etc/netplan/99-ansible-private.yaml &&
+        grep -Fq 'dhcp4: true' /etc/netplan/99-ansible-private.yaml; then
+        echo private-network-unchanged
+        exit 0
+      fi
+      install -d -m 755 /etc/netplan
+      cat > /etc/netplan/99-ansible-private.yaml <<EOF
+      network:
+        version: 2
+        ethernets:
+          private0:
+            match:
+              macaddress: "$expected_mac"
+            set-name: private0
+            dhcp4: true
+            dhcp6: true
+            accept-ra: true
+            optional: true
+      EOF
+      chmod 600 /etc/netplan/99-ansible-private.yaml
+      netplan generate
+      netplan apply
+      echo private-network-changed
+      {% endif %}
+      {% else %}
+      {% if kvm_private_network_vm.os == 'rocky9' %}
+      if nmcli -g NAME connection show | grep -Fxq private-net; then
+        if [ "$(nmcli -g connection.interface-name connection show private-net)" = "$interface" ] &&
+          [ "$(nmcli -g ipv4.method connection show private-net)" = manual ] &&
+          [ "$(nmcli -g ipv4.addresses connection show private-net)" = "$address" ] &&
+          [ "$(nmcli -g ipv4.never-default connection show private-net)" = yes ] &&
+          ip -4 -o address show | awk '{print $4}' | grep -Fxq "$address"; then
+          echo private-network-unchanged
+          exit 0
+        fi
+        nmcli connection modify private-net \
+          connection.interface-name "$interface" \
+          ipv4.method manual \
+          ipv4.addresses "$address" \
+          ipv4.never-default yes \
+          ipv6.method auto
+      else
+        nmcli connection add type ethernet \
+          con-name private-net \
+          ifname "$interface" \
+          ipv4.method manual \
+          ipv4.addresses "$address" \
+          ipv4.never-default yes \
+          ipv6.method auto
+      fi
+      nmcli connection up private-net
+      echo private-network-changed
+      {% else %}
+      if [ -f /etc/netplan/99-ansible-private.yaml ] &&
+        grep -Fq "$expected_mac" /etc/netplan/99-ansible-private.yaml &&
+        grep -Fq "$address" /etc/netplan/99-ansible-private.yaml &&
+        ip -4 -o address show | awk '{print $4}' | grep -Fxq "$address"; then
+        echo private-network-unchanged
+        exit 0
+      fi
+      install -d -m 755 /etc/netplan
+      cat > /etc/netplan/99-ansible-private.yaml <<EOF
+      network:
+        version: 2
+        ethernets:
+          private0:
+            match:
+              macaddress: "$expected_mac"
+            set-name: private0
+            dhcp4: false
+            dhcp6: true
+            accept-ra: true
+            addresses:
+              - "$address"
+      EOF
+      chmod 600 /etc/netplan/99-ansible-private.yaml
+      netplan apply
+      echo private-network-changed
+      {% endif %}
+
+      for attempt in $(seq 1 30); do
+        if ip -4 -o address show | awk '{print $4}' | grep -Fxq "$address"; then
+          exit 0
+        fi
+        sleep 1
+      done
+      echo "Private IPv4 address $address was not assigned to $interface." >&2
+      exit 1
+      {% endif %}
+  changed_when: "'private-network-changed' in kvm_private_network_result.stdout"
+  register: kvm_private_network_result

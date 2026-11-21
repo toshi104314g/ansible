@@ -68,15 +68,25 @@
           'python3',
           playbook_dir ~ '/../configure-network-bridges.py',
           utm_documents_directory,
-          item.item.name
+          item.item.name,
+          '--management-host-interface',
+          item.item.management_host_interface
         ]
         + (
-            ['--lab']
+            [
+              '--lab',
+              '--lab-host-interface',
+              item.item.lab_host_interface
+            ]
             if item.item.lab_ipv4_address | default('') | string | length > 0
             else []
           )
         + (
-            ['--dmz']
+            [
+              '--dmz',
+              '--dmz-host-interface',
+              item.item.dmz_host_interface
+            ]
             if item.item.dmz_ipv4_address | default('') | string | length > 0
             else []
           )
