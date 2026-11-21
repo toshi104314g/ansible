@@ -69,6 +69,18 @@
       - item.value.utm_ipv4_prefix_length | int <= 32
       - item.value.utm_ipv4_dns_servers | length > 0
       - >-
+        item.value.lab_ipv4_address is not defined
+        or (
+          item.value.lab_ipv4_address is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+          and item.value.lab_ipv4_address.split('.') | map('int') | select('gt', 255) | list | length == 0
+        )
+      - >-
+        item.value.dmz_ipv4_address is not defined
+        or (
+          item.value.dmz_ipv4_address is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+          and item.value.dmz_ipv4_address.split('.') | map('int') | select('gt', 255) | list | length == 0
+        )
+      - >-
         utm_require_ssh_alias | default(true) == false or
         item.value.utm_provision != 'existing' or
         item.value.utm_ssh_alias is defined
@@ -76,6 +88,7 @@
       Host '{{ item.key }}' must define utm_os (rocky9 or ubuntu26),
       utm_template_name, utm_vm_name, utm_provision, ansible_host,
       utm_network_connection, utm_global_ipv6_prefix, and IPv4 network settings.
+      lab_ipv4_address and dmz_ipv4_address, when provided, must be valid IPv4 addresses.
       Existing hosts also require utm_ssh_alias.
   loop: "{{ utm_inventory_hostvars | dict2items }}"
 
@@ -115,7 +128,9 @@
           'global_ipv6_prefix': item.value.utm_global_ipv6_prefix,
           'ipv4_prefix_length': item.value.utm_ipv4_prefix_length,
           'ipv4_gateway': item.value.utm_ipv4_gateway,
-          'ipv4_dns_servers': item.value.utm_ipv4_dns_servers
+          'ipv4_dns_servers': item.value.utm_ipv4_dns_servers,
+          'lab_ipv4_address': item.value.lab_ipv4_address | default(''),
+          'dmz_ipv4_address': item.value.dmz_ipv4_address | default('')
         }] if item.value.utm_provision == 'clone' else [])
       }}
     utm_existing_vms: >-

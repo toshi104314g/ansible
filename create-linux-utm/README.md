@@ -14,6 +14,8 @@ The existing-guest configuration path also adds this account using its current O
 
 The following network settings are inherited from the inventory's `all.vars` or the host's groups: `utm_network_connection`, `utm_global_ipv6_prefix`, `utm_ipv4_prefix_length`, `utm_ipv4_gateway`, and `utm_ipv4_dns_servers`. `utm_provision` may be set per host or inherited from a group and must be `clone` or `existing`. Existing guests additionally require `utm_ssh_alias`.
 
+Before a clone is started, its UTM `config.plist` and UTM's in-memory configuration are updated so the first bridged interface uses Mac `en7`. A LAB address adds a second interface bridged to `vlan0`; a DMZ address adds an interface bridged to `vlan1`. DMZ-only guests therefore use `enp0s2` for DMZ, without a dummy LAB interface. Guests with both addresses use `enp0s2` for LAB and `enp0s3` for DMZ. Running VMs are not modified; if their bridge configuration needs changes, the playbook reports an error instead.
+
 Run commands from the repository root and always select exactly one inventory with `-i`:
 
 ```sh

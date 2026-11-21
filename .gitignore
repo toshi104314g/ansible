@@ -3,6 +3,9 @@
 .ansible/
 ansible.log
 /tmpbooks/
+!/tmpbooks/
+/tmpbooks/*
+!/tmpbooks/init-lab-network.tml
 
 # Credentials and local secrets
 .env

@@ -60,6 +60,34 @@
   changed_when: false
   loop: "{{ utm_clone_vms }}"
 
+- name: Configure UTM clone bridge interfaces before startup
+  ansible.builtin.command:
+    argv: >-
+      {{
+        [
+          'python3',
+          playbook_dir ~ '/../configure-network-bridges.py',
+          utm_documents_directory,
+          item.item.name
+        ]
+        + (
+            ['--lab']
+            if item.item.lab_ipv4_address | default('') | string | length > 0
+            else []
+          )
+        + (
+            ['--dmz']
+            if item.item.dmz_ipv4_address | default('') | string | length > 0
+            else []
+          )
+        + (['--running'] if item.stdout | trim == 'started' else [])
+      }}
+  register: utm_network_bridge_update
+  changed_when: utm_network_bridge_update.stdout | trim == 'changed'
+  loop: "{{ utm_start_status.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
 - name: Start stopped cloned VMs
   ansible.builtin.command:
     argv:

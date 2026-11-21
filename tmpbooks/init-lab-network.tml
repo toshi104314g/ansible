@@ -1,0 +1,391 @@
+---
+- name: Validate lab and DMZ network inventory settings
+  hosts: all
+  gather_facts: false
+
+  vars:
+    lab_network_has_lab_address: "{{ lab_ipv4_address is defined }}"
+    lab_network_has_dmz_address: "{{ dmz_ipv4_address is defined }}"
+    lab_network_address: >-
+      {{ lab_ipv4_address if lab_ipv4_address is defined else dmz_ipv4_address }}
+    lab_network_name: "{{ 'lab' if lab_ipv4_address is defined else 'dmz' }}"
+
+  tasks:
+    - name: Reject hosts assigned to both lab and DMZ networks
+      ansible.builtin.assert:
+        that:
+          - not (lab_network_has_lab_address | bool and lab_network_has_dmz_address | bool)
+        fail_msg: >-
+          Host '{{ inventory_hostname }}' defines both lab_ipv4_address and
+          dmz_ipv4_address. Assign only one network before running this playbook.
+
+    - name: Validate the selected network IPv4 address
+      ansible.builtin.assert:
+        that:
+          - lab_network_address is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')
+          - lab_network_address.split('.') | map('int') | select('gt', 255) | list | length == 0
+          - lab_network_address.split('.')[-1] | int > 1
+          - lab_network_address.split('.')[-1] | int < 255
+        fail_msg: >-
+          Host '{{ inventory_hostname }}' has invalid {{ lab_network_name }}
+          IPv4 address '{{ lab_network_address }}'. Use a host address in the
+          corresponding /24 network, excluding .0, .1, and .255.
+      register: lab_network_address_validation
+      when: lab_network_has_lab_address | bool or lab_network_has_dmz_address | bool
+
+- name: Start stopped UTM guests assigned to the lab or DMZ network
+  hosts: all
+  gather_facts: false
+  become: false
+
+  tasks:
+    - name: Read the UTM guest status
+      ansible.builtin.command:
+        argv:
+          - utmctl
+          - status
+          - "{{ utm_vm_name }}"
+      delegate_to: localhost
+      register: lab_network_utm_status
+      changed_when: false
+      when:
+        - utm_vm_name is defined
+        - lab_ipv4_address is defined or dmz_ipv4_address is defined
+
+    - name: Require UTM guest to be started or stopped
+      ansible.builtin.assert:
+        that:
+          - lab_network_utm_status.stdout | trim in ['started', 'stopped']
+        fail_msg: >-
+          UTM guest '{{ utm_vm_name }}' is in state
+          '{{ lab_network_utm_status.stdout | trim }}'; this playbook can only
+          start stopped guests or use guests that are already started.
+      when:
+        - utm_vm_name is defined
+        - lab_ipv4_address is defined or dmz_ipv4_address is defined
+
+    - name: Start stopped UTM guest
+      ansible.builtin.command:
+        argv:
+          - utmctl
+          - start
+          - "{{ utm_vm_name }}"
+      delegate_to: localhost
+      when:
+        - utm_vm_name is defined
+        - lab_ipv4_address is defined or dmz_ipv4_address is defined
+        - lab_network_utm_status.stdout | trim == 'stopped'
+      changed_when: true
+
+    - name: Wait for UTM guest to reach started state
+      ansible.builtin.command:
+        argv:
+          - utmctl
+          - status
+          - "{{ utm_vm_name }}"
+      delegate_to: localhost
+      register: lab_network_utm_final_status
+      changed_when: false
+      until: lab_network_utm_final_status.stdout | trim == 'started'
+      retries: 12
+      delay: 5
+      when:
+        - utm_vm_name is defined
+        - lab_ipv4_address is defined or dmz_ipv4_address is defined
+
+- name: Start stopped KVM guests assigned to the lab or DMZ network
+  hosts: all
+  connection: local
+  gather_facts: false
+  become: false
+
+  vars:
+    kvm_connection: qemu:///system
+    kvm_controller_ssh_alias: ubuntu
+    kvm_controller_ssh_user: >-
+      {{ lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true) }}
+
+  tasks:
+    - name: Record selected KVM guest inventory variables
+      ansible.builtin.set_fact:
+        lab_network_kvm_hostvars: >-
+          {{
+            (
+              (
+                ansible_play_hosts_all
+                | map('extract', hostvars)
+                | selectattr('kvm_vm_name', 'defined')
+                | selectattr('lab_ipv4_address', 'defined')
+                | list
+              )
+              +
+              (
+                ansible_play_hosts_all
+                | map('extract', hostvars)
+                | selectattr('kvm_vm_name', 'defined')
+                | selectattr('dmz_ipv4_address', 'defined')
+                | list
+              )
+            ) | unique(attribute='inventory_hostname')
+          }}
+      run_once: true
+
+    - name: Require unique KVM domain names for selected hosts
+      ansible.builtin.assert:
+        that:
+          - >-
+            lab_network_kvm_hostvars
+            | map(attribute='kvm_vm_name')
+            | unique
+            | length
+            == lab_network_kvm_hostvars | length
+        fail_msg: "KVM VM names for lab/DMZ hosts must be unique."
+      when: lab_network_kvm_hostvars | length > 0
+      run_once: true
+
+    - name: Resolve the invoking user's home for KVM SSH configuration
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - >-
+            import os, pwd;
+            user = os.environ.get('SUDO_USER');
+            print(pwd.getpwnam(user).pw_dir if user else os.path.expanduser('~'))
+      register: lab_network_kvm_user_home
+      changed_when: false
+      when: lab_network_kvm_hostvars | length > 0
+      run_once: true
+
+    - name: Register the Ubuntu KVM controller
+      ansible.builtin.add_host:
+        name: lab_network_kvm_controller
+        groups: lab_network_kvm_controllers
+        ansible_host: "{{ kvm_controller_ssh_alias }}"
+        ansible_connection: ssh
+        ansible_user: "{{ kvm_controller_ssh_user }}"
+        ansible_ssh_private_key_file: >-
+          {{ lab_network_kvm_user_home.stdout | trim }}/.ssh/id_ed25519
+        ansible_ssh_common_args: >-
+          -F {{ lab_network_kvm_user_home.stdout | trim }}/.ssh/config
+          -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+      when: lab_network_kvm_hostvars | length > 0
+      run_once: true
+
+    - name: Read the current state of selected KVM VMs
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - domstate
+          - "{{ item.kvm_vm_name }}"
+      loop: "{{ lab_network_kvm_hostvars }}"
+      loop_control:
+        label: "{{ item.inventory_hostname }}"
+      register: lab_network_kvm_status
+      changed_when: false
+      delegate_to: lab_network_kvm_controller
+      run_once: true
+
+    - name: Require selected KVM VMs to be running or shut off
+      ansible.builtin.assert:
+        that:
+          - item.stdout | trim in ['running', 'shut off']
+        fail_msg: >-
+          KVM VM '{{ item.item.kvm_vm_name }}' is in state
+          '{{ item.stdout | trim }}'; this playbook can only start shut off
+          guests or use guests that are already running.
+      loop: "{{ lab_network_kvm_status.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.inventory_hostname }}"
+      run_once: true
+
+    - name: Start shut off KVM VMs
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - start
+          - "{{ item.item.kvm_vm_name }}"
+      loop: "{{ lab_network_kvm_status.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.inventory_hostname }}"
+      when: item.stdout | trim == 'shut off'
+      changed_when: true
+      delegate_to: lab_network_kvm_controller
+      run_once: true
+
+    - name: Verify selected KVM VMs are running
+      ansible.builtin.command:
+        argv:
+          - virsh
+          - --connect
+          - "{{ kvm_connection }}"
+          - domstate
+          - "{{ item.kvm_vm_name }}"
+      loop: "{{ lab_network_kvm_hostvars }}"
+      loop_control:
+        label: "{{ item.inventory_hostname }}"
+      register: lab_network_kvm_final_status
+      changed_when: false
+      until: lab_network_kvm_final_status.stdout | trim == 'running'
+      retries: 12
+      delay: 5
+      delegate_to: lab_network_kvm_controller
+      run_once: true
+
+- name: Configure selected lab or DMZ network interfaces
+  hosts: all
+  gather_facts: false
+  become: true
+
+  vars:
+    lab_network_has_lab_address: "{{ lab_ipv4_address is defined }}"
+    lab_network_has_dmz_address: "{{ dmz_ipv4_address is defined }}"
+    lab_network_address: >-
+      {{ lab_ipv4_address if lab_ipv4_address is defined else dmz_ipv4_address }}
+    lab_network_name: "{{ 'lab' if lab_ipv4_address is defined else 'dmz' }}"
+    lab_network_interface: >-
+      {{
+        'enp0s2'
+        if lab_ipv4_address is defined or utm_vm_name is defined
+        else 'enp0s3'
+      }}
+    lab_network_gateway: "{{ (lab_network_address.split('.')[:3] | join('.')) ~ '.1' }}"
+    lab_network_profile: "{{ lab_network_name ~ '-net' }}"
+
+  tasks:
+    - name: Wait for started UTM guests to accept Ansible connections
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        sleep: 5
+        timeout: 600
+      when:
+        - utm_vm_name is defined
+        - lab_ipv4_address is defined or dmz_ipv4_address is defined
+
+    - name: Wait for started KVM guests to accept Ansible connections
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        sleep: 5
+        timeout: 600
+      when:
+        - kvm_vm_name is defined
+        - lab_ipv4_address is defined or dmz_ipv4_address is defined
+
+    - name: Check that the selected lab or DMZ network device exists
+      ansible.builtin.command:
+        argv:
+          - ip
+          - link
+          - show
+          - dev
+          - "{{ lab_network_interface }}"
+      register: lab_network_dmz_device_check
+      changed_when: false
+      failed_when: false
+      when:
+        - lab_network_has_lab_address | bool or lab_network_has_dmz_address | bool
+
+    - name: Require the selected lab or DMZ network device before changing routes
+      ansible.builtin.assert:
+        that:
+          - lab_network_dmz_device_check.rc == 0
+        fail_msg: >-
+          Host '{{ inventory_hostname }}' does not have the required
+          {{ lab_network_interface }} network device for its {{ lab_network_name }}
+          network. Check that the corresponding UTM bridge interface is present,
+          then rerun this playbook. This run has not changed network settings.
+      when:
+        - lab_network_has_lab_address | bool or lab_network_has_dmz_address | bool
+
+    - name: Disable the default gateway on enp0s1
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/bash
+          - -s
+        stdin: |
+          set -euo pipefail
+          connection=$(nmcli -g GENERAL.CONNECTION device show enp0s1)
+          if [ -z "$connection" ] || [ "$connection" = "--" ]; then
+            echo "enp0s1 has no active NetworkManager connection" >&2
+            exit 1
+          fi
+
+          never_default=$(nmcli -g ipv4.never-default connection show "$connection")
+          gateway=$(nmcli -g ipv4.gateway connection show "$connection")
+          if [ "$gateway" = "--" ]; then
+            gateway=
+          fi
+          if [ "$never_default" != yes ] || [ -n "$gateway" ]; then
+            nmcli connection modify "$connection" ipv4.gateway "" ipv4.never-default yes
+            nmcli device reapply enp0s1
+            echo changed
+          fi
+      register: lab_network_uplink_result
+      changed_when: "'changed' in lab_network_uplink_result.stdout"
+      when:
+        - lab_network_has_lab_address | bool or lab_network_has_dmz_address | bool
+
+    - name: Create or update and activate the selected lab or DMZ profile
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/bash
+          - -s
+        stdin: |
+          set -euo pipefail
+          profile={{ lab_network_profile | quote }}
+          address={{ (lab_network_address ~ '/24') | quote }}
+          gateway={{ lab_network_gateway | quote }}
+          interface={{ lab_network_interface | quote }}
+          changed=0
+
+          if nmcli -g NAME connection show | grep -Fxq "$profile"; then
+            if [ "$(nmcli -g connection.interface-name connection show "$profile")" != "$interface" ] ||
+               [ "$(nmcli -g connection.autoconnect connection show "$profile")" != yes ] ||
+               [ "$(nmcli -g ipv4.method connection show "$profile")" != manual ] ||
+               [ "$(nmcli -g ipv4.addresses connection show "$profile")" != "$address" ] ||
+               [ "$(nmcli -g ipv4.gateway connection show "$profile")" != "$gateway" ] ||
+               [ "$(nmcli -g ipv4.never-default connection show "$profile")" != no ] ||
+               [ "$(nmcli -g ipv6.method connection show "$profile")" != auto ]; then
+              nmcli connection modify "$profile" \
+                connection.interface-name "$interface" \
+                connection.autoconnect yes \
+                ipv4.method manual \
+                ipv4.addresses "$address" \
+                ipv4.gateway "$gateway" \
+                ipv4.never-default no \
+                ipv6.method auto
+              changed=1
+            fi
+          else
+            nmcli connection add type ethernet \
+              con-name "$profile" \
+              ifname "$interface" \
+              connection.autoconnect yes \
+              ipv4.method manual \
+              ipv4.addresses "$address" \
+              ipv4.gateway "$gateway" \
+              ipv4.never-default no \
+              ipv6.method auto
+            changed=1
+          fi
+
+          active_profile=$(nmcli -g GENERAL.CONNECTION device show "$interface")
+          if [ "$active_profile" != "$profile" ]; then
+            nmcli connection up "$profile" ifname "$interface"
+            changed=1
+          elif [ "$changed" -eq 1 ]; then
+            nmcli device reapply "$interface"
+          fi
+
+          if [ "$changed" -eq 1 ]; then
+            echo changed
+          fi
+      register: lab_network_profile_result
+      changed_when: "'changed' in lab_network_profile_result.stdout"
+      when:
+        - lab_network_has_lab_address | bool or lab_network_has_dmz_address | bool
